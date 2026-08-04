@@ -5,60 +5,75 @@
 # internet, a very short list is reachable from the house, and everything else
 # is reachable only over Tailscale.
 #
-# Contract v3 §5.1. Note the "enforced by" column — it is the whole point:
+# Network exposure. Every port, where it is reachable from, and — crucially —
+# WHAT ACTUALLY ENFORCES THAT:
 #
-#   port          service                    reachable from     enforced by
-#   ------------  -------------------------  -----------------  ----------------
-#   22/tcp        SSH                        LAN + tailscale0   THIS FILE
-#   8096/tcp      Jellyfin (host networking) LAN + tailscale0   THIS FILE
-#   1900,7359/udp Jellyfin discovery         LAN only           THIS FILE
-#   5055/tcp      Jellyseerr                 LAN + tailscale0   bind address
-#   6767/tcp      Bazarr                     tailscale0 only    bind address
-#   7878/tcp      Radarr                     tailscale0 only    bind address
-#   8080/tcp      qBittorrent WebUI          tailscale0 only    bind address
-#   8081/tcp      SABnzbd                    tailscale0 only    bind address
-#   8989/tcp      Sonarr                     tailscale0 only    bind address
-#   9696/tcp      Prowlarr                   tailscale0 only    bind address
-#   41641/udp     Tailscale transport        all interfaces     — (disclosed)
+#   port          service                    reachable from   enforced by
+#   ------------  -------------------------  ---------------  --------------
+#   22/tcp        SSH                        LAN only         THIS FILE
+#   8096/tcp      Jellyfin (host networking) LAN only *       THIS FILE
+#   1900,7359/udp Jellyfin discovery         LAN only         THIS FILE
+#   5055/tcp      Jellyseerr                 LAN only         bind address
+#   6767/tcp      Bazarr                     LAN only         bind address
+#   7878/tcp      Radarr                     LAN only         bind address
+#   8080/tcp      qBittorrent WebUI          LAN only         bind address
+#   8081/tcp      SABnzbd                    LAN only         bind address
+#   8989/tcp      Sonarr                     LAN only         bind address
+#   9696/tcp      Prowlarr                   LAN only         bind address
 #
-# THIS FILE IMPLEMENTS ONLY THE FOUR ROWS MARKED "THIS FILE". The rows marked
-# "bind address" are the stack's business and appear nowhere below.
+#   * 8096 is intended to become internet-reachable via a router port-forward,
+#     for a Roku client outside the house. See "THE PLANNED PORT-FORWARD" below
+#     — that is NOT yet configured here, and forwarding 8096 as it stands today
+#     would send passwords over plaintext HTTP.
 #
-# Nothing is port-forwarded from the router, ever. Jellyfin has no rate limiting
-# and no MFA and is not built to sit on the open internet.
+# THIS FILE IMPLEMENTS ONLY THE ROWS MARKED "THIS FILE" — four of them. The rows
+# marked "bind address" belong to the stack repo and appear nowhere below.
+#
+# NO TAILSCALE. It was removed along with contract v3's tailnet design: the
+# person this server exists for uses a Roku, which has no Tailscale or WireGuard
+# client, so a VPN-based access model cannot serve the actual requirement. What
+# replaced it is plain LAN reachability plus an intended port-forward.
 #
 # ---------------------------------------------------------------------------
-# READ THIS BEFORE ADDING A PORT — contract v3 §5.2
+# READ THIS BEFORE ADDING A PORT — contract §5.2
 # ---------------------------------------------------------------------------
 # For a Docker-published port there is NO host-firewall layer. Not a weak one,
 # not a second one — none.
 #
-# Docker DNATs published ports in PREROUTING. The destination address is
-# rewritten to the container before the packet reaches INPUT, so the packet
-# never enters the chain this firewall lives in. It is then forwarded, and this
-# config does not filter forwarding either (`networking.firewall.filterForward`
-# is left at its default of false). A rule here naming a published port is not
-# wrong, it is NEVER CONSULTED.
+# Docker DNATs published ports in PREROUTING. The destination is rewritten to
+# the container before the packet reaches INPUT, which is the chain this
+# firewall lives in. It is then forwarded, and this config does not filter
+# forwarding either (`networking.firewall.filterForward` left at its default
+# false). A rule here naming a published port is not weak, it is NEVER
+# CONSULTED.
 #
-# So the rules below exist for exactly one category: SERVICES THAT BIND ON THE
-# HOST. Today that is sshd and host-networked Jellyfin, and nothing else.
-# Everything Docker publishes is governed solely by its bind address
-# (`BIND_ADDR_TAILNET` / `BIND_ADDR_LAN` in palimpsest-stack). That is the other
-# repo's file and this session does not edit it.
+# So the rules below cover exactly one category: SERVICES THAT BIND ON THE HOST
+# — sshd and host-networked Jellyfin. Everything else is governed solely by the
+# address the stack binds it to. That is the other repo's file.
 #
-# Three practical consequences:
-#
-#   1. An admin UI that is unreachable is a BIND ADDRESS problem. Adding a port
-#      here cannot fix it and only widens the firewall.
-#   2. An admin UI reachable when it should not be is ALSO a bind address
-#      problem. No rule here can close it.
-#   3. THE ONE PATH BACK: if a service ever moves from Docker publishing to host
+#   1. An admin UI unreachable? BIND ADDRESS. Adding a port here cannot fix it.
+#   2. An admin UI reachable when it should not be? Also the bind address. No
+#      rule here can close it.
+#   3. THE ONE PATH BACK: if a service moves from Docker publishing to host
 #      networking, it stops being covered by its bind address and starts needing
-#      a rule here. Add it AT THAT TIME. This is the only circumstance in which
-#      this list should grow.
+#      a rule here. Add it AT THAT TIME. That is the only reason this list grows.
 #
-# Contract v3 removed 5055 and the six admin-UI ports from this file for exactly
-# this reason. They read as protection and provided none.
+# ---------------------------------------------------------------------------
+# THE PLANNED PORT-FORWARD — read before opening anything on the router
+# ---------------------------------------------------------------------------
+# The intent is to forward a port so a Roku outside the house can reach
+# Jellyfin. That is a deliberate, accepted risk and this file does not argue
+# with it. But note what is and is not true TODAY:
+#
+#   - 8096 is PLAIN HTTP. Forwarding it as-is puts your father's password, and
+#     every session token, on the open internet in cleartext.
+#   - Jellyfin has no rate limiting and no MFA. It is not built to be the thing
+#     facing the internet.
+#
+# The supported way to do this is to terminate TLS in front of Jellyfin and
+# forward 443 ONLY — never 8096, and never 22. NixOS does this declaratively
+# with `services.nginx` + `security.acme`, which is a contained addition to this
+# repo when you want it. Nothing here is set up for it yet.
 # =============================================================================
 { ... }:
 
@@ -98,39 +113,11 @@
     enable = true;
 
     # Default-deny inbound. These two lists are EMPTY ON PURPOSE: anything
-    # listed here would be open on every interface, including the wired LAN
-    # interface, which is never what contract §5 asks for. Every port this
-    # machine exposes is scoped either to an interface or to a source range,
-    # below.
+    # listed here would be open on EVERY interface and every source — including,
+    # once the router forwards a port, the open internet. Everything this
+    # machine exposes is scoped to a source range instead, below.
     allowedTCPPorts = [ ];
     allowedUDPPorts = [ ];
-
-    # -------------------------------------------------------------------------
-    # Tailscale-only services
-    # -------------------------------------------------------------------------
-    # Scoped to the tailscale0 interface, so these are reachable from your
-    # tailnet and from nowhere else — not from the LAN, not from the internet.
-    #
-    # THIS LIST IS SHORT ON PURPOSE, AND IT SHRANK IN CONTRACT v3.
-    #
-    # It contains only services that bind ON THE HOST: sshd, and Jellyfin via
-    # host networking. Every admin UI (6767, 7878, 8080, 8081, 8989, 9696) and
-    # Jellyseerr (5055) used to be listed here and have been REMOVED, because
-    # they are Docker-published and an INPUT rule never sees their traffic — see
-    # the §5.2 explanation at the top of this file. Those entries read as
-    # protection and provided none.
-    #
-    # Do not "restore" them. Their exposure is governed by the stack's bind
-    # address. If you add a port here, it must be for something that binds on
-    # the host itself.
-    #
-    # Note this is deliberately a PORT LIST and not
-    # `trustedInterfaces = [ "tailscale0" ]`. Trusting the interface would open
-    # every port on the machine to the tailnet.
-    interfaces."tailscale0".allowedTCPPorts = [
-      22 # SSH — sshd binds on the host
-      8096 # Jellyfin — host networking, not published by Docker
-    ];
 
     # -------------------------------------------------------------------------
     # LAN-reachable services — the source-restricted part
@@ -151,11 +138,32 @@
     #   22   — sshd, a host process
     #   8096 — Jellyfin, host networking, not published by Docker
     #   1900 } Jellyfin client auto-discovery (SSDP + Jellyfin's own broadcast),
-    #   7359 } also host networking. LAN-only: discovery is a broadcast
-    #          mechanism that does not traverse a tailnet, so putting these on
-    #          tailscale0 would be surface with no function. Without them,
-    #          Jellyfin can *send* discovery traffic but inbound probes are
-    #          dropped, and every client has to be pointed at an IP by hand.
+    #   7359 } also host networking. Without these, Jellyfin can *send*
+    #          discovery traffic but inbound probes are dropped, and every
+    #          client in the house has to be pointed at an IP by hand.
+    #
+    # ---- WHAT THIS MEANS FOR THE PLANNED PORT-FORWARD ----------------------
+    # A forwarded packet arrives here with the ORIGINAL PUBLIC SOURCE ADDRESS.
+    # The router rewrites the destination, not the source. So a packet from the
+    # internet matches neither rule above, falls through, and is dropped by the
+    # chain's default policy.
+    #
+    # Consequence, and it is a two-sided one:
+    #
+    #   GOOD: a port-forward switched on at the router does NOT silently expose
+    #         anything. This layer still fails closed. You cannot accidentally
+    #         publish Jellyfin by fat-fingering the router.
+    #
+    #   ALSO: which means the forward will simply NOT WORK until a rule is added
+    #         here on purpose. That is the intended shape — internet exposure
+    #         should take a deliberate edit in a file under version control, not
+    #         a checkbox in a router UI.
+    #
+    # When you get there, the rule to add is for the TLS port only, e.g.
+    #
+    #     tcp dport 443 accept comment "public: Jellyfin via TLS reverse proxy"
+    #
+    # NOT 8096 (plaintext), and never 22.
     #
     # TCP 5055 (Jellyseerr) WAS in this rule under contract v2 and was REMOVED
     # in v3. It is Docker-published, so this rule never saw its traffic — the
@@ -167,55 +175,7 @@
       ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } udp dport { 1900, 7359 } accept comment "contract v3 §5.1: Jellyfin client auto-discovery, LAN only"
     '';
 
-    # -------------------------------------------------------------------------
-    # Reverse path filtering
-    # -------------------------------------------------------------------------
-    # NixOS defaults this to strict. Loose is the setting Tailscale wants:
-    # tailnet traffic can legitimately arrive on an interface that is not the
-    # one the reply would leave by, and strict filtering silently drops those
-    # packets, producing a tailnet that pings but will not carry a TCP session.
-    #
-    # The NixOS tailscale module only relaxes this automatically when
-    # `useRoutingFeatures` is "client" or "both" — and this node is neither a
-    # subnet router nor an exit node, so it would otherwise be left strict.
-    #
-    # Security cost is small on a default-deny box: loose rpfilter still drops
-    # packets with source addresses that are unroutable from here entirely.
-    checkReversePath = "loose";
   };
-
-  # ---------------------------------------------------------------------------
-  # Tailscale
-  # ---------------------------------------------------------------------------
-  services.tailscale = {
-    enable = true;
-
-    # Opens UDP 41641 so peers can establish DIRECT connections. Without it
-    # tailscale still works, but traffic falls back to relaying through a DERP
-    # server — which for streaming video off this box would be both slow and
-    # rude to Tailscale's infrastructure.
-    #
-    # This default is `false` in nixpkgs, so it genuinely has to be set.
-    #
-    # 41641/udp is open on ALL interfaces, which is why contract v2 §5.1 lists
-    # it explicitly — an undocumented open port on a default-deny box is worse
-    # than a documented one. It is Tailscale's transport, not an application
-    # port, and nothing is forwarded at the router, so in practice it is only
-    # reachable from the LAN.
-    openFirewall = true;
-  };
-
-  # NO AUTH KEY LIVES HERE — contract §6.
-  #
-  # The NixOS module can auto-authenticate from `services.tailscale.authKeyFile`,
-  # and we deliberately do not use it: that would mean a credential on this
-  # machine's disk referenced from a file in this repo. You authenticate once,
-  # by hand, on first boot:
-  #
-  #     sudo tailscale up --ssh
-  #
-  # ...and the resulting node key persists in /var/lib/tailscale across reboots
-  # and rebuilds. It is a one-time manual step by design. See NOTES.md.
 
   # ---------------------------------------------------------------------------
   # History of this file's rules — why they are the shape they are
@@ -225,11 +185,16 @@
   #          documented rather than silently open.
   #
   # v2 → v3: TCP 5055 removed from the LAN rule, and 5055 + the six admin-UI
-  #          ports removed from the tailscale0 list. All were Docker-published,
+  #          ports removed from the tailnet list. All were Docker-published,
   #          so INPUT never saw their traffic. v2 believed the host firewall
   #          bounded them; it did not. Removing an inert rule does not change
   #          real exposure by one packet — it removes a false belief, which over
   #          a five-year life is the more dangerous of the two.
   #
-  # Nothing here is outstanding against contract v3.
+  # v3 → LAN-only: Tailscale removed entirely, along with the tailscale0 port
+  #          list, the reverse-path-filter relaxation that existed only for it,
+  #          and UDP 41641. The tailnet could never have served the actual
+  #          requirement — a Roku has no VPN client — so it was complexity and
+  #          an external account dependency bought nothing. The six admin UIs
+  #          become LAN-only, enforced by their bind address, not here.
 }
