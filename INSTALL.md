@@ -250,7 +250,7 @@ Set a **DHCP reservation** for the wired interface's MAC.
 sudo /opt/palimpsest-system/scripts/verify-contract
 ```
 
-Everything must pass. This is the gate before the other half of the system gets
+Everything must pass — this implements contract v2 §7.1. It is the gate before the other half of the system gets
 installed — it confirms UIDs, ownership, the firewall, the stack unit's state,
 and most importantly that hardlinking works between `/data/torrents` and
 `/data/media`.
@@ -278,6 +278,14 @@ cat /sys/bus/pci/devices/0000:01:00.0/power_state    # want D3cold
 
 The system layer is done. `palimpsest-stack` gets cloned to
 `/opt/palimpsest-stack` and owns `compose.yaml` from here.
+
+> **§11 is a prerequisite for this step, not a suggestion.** The stack unit has
+> an `ExecStartPre` that waits up to 60 seconds for `tailscale0` to have an IPv4
+> address and then **fails**. On a node where `tailscale up` has never been run
+> there is no address to wait for, so starting the stack will fail by design
+> with `tailscale0 has no IPv4 address after 60s` in the journal. That is
+> contract v2 §3 working correctly — the stack binds its admin UIs to the
+> tailnet address, and Docker cannot bind an address that does not exist.
 
 The stack unit is installed but **will not start at boot yet** — that is
 contract §3's "ships disabled". Bring it up by hand while debugging:

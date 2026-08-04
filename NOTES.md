@@ -19,10 +19,11 @@ Pinned commit: `nixos-26.05` at `531670d871c0e29724a02f3cbcac170adc65b58c`
 (2026-08-03), recorded in `flake.lock`.
 
 **The config was also booted.** I built the test VM, added a temporary oneshot
-service that runs `scripts/verify-contract` at boot, and ran it under KVM. Final
-result: **30 passed, 0 failed, 4 informational** (the informational ones are the
-GPU checks, which no VM can pass). So the following are observed behaviour on a
-running system, not predictions:
+service that runs `scripts/verify-contract` at boot, and ran it under KVM. Result
+against **contract v2**: **42 passed, 0 failed, 5 informational** (the
+informational ones are the GPU checks, which no VM can pass, plus the §5.2
+reminder). So the following are observed behaviour on a running system, not
+predictions:
 
 - `media` 1500/1500, `frank` 1000, `render` 303, `media` shell = `nologin`
 - `/data`, `/opt/palimpsest-stack` and the whole media tree created by
@@ -31,8 +32,16 @@ running system, not predictions:
 - all five sleep targets **masked**; `HandleLidSwitch=ignore` present in the
   generated `logind.conf`
 - docker running; `palimpsest-stack.service` present and **not** started at boot
-- nftables table loaded with the RFC1918 rule in it
+- the stack unit carries `After=docker.service tailscaled.service`, all three
+  `RequiresMountsFor` paths including `/data/transcode`, and an `ExecStartPre`
+- the firewall's LAN rule covers tcp/22, tcp/8096, tcp/5055 and udp/1900+7359,
+  and the tailscale0 interface rule is present
 - **the hardlink test passes** — `/data/torrents` → `/data/media`, same inode
+
+The `ExecStartPre` tailscale0 wait was tested separately, since the stack unit
+does not start in the VM: **6 ms exit 0** against an interface that has an IPv4
+address, and a clean **60 s exit 1** with the intended journal line against one
+that does not.
 
 That VM run also caught three real bugs before you ever touched the laptop; they
 are described in §3.5.
@@ -244,61 +253,88 @@ generated artifact (`nft list ruleset`, the unit text) or boot it.
 
 ---
 
-## 4. Contract observations — flagged, not worked around
+## 4. Contract observations
 
-Prompt 1 said to stop and tell you rather than change a contract value or route
-around it. Two things.
+This config is built against **contract v2 (2026-08-04)**. Everything this layer
+flagged against v1 was amended in v2 rather than worked around, which is the
+outcome the flagging was for. Kept here as a record of why the rules look the
+way they do.
 
-### 4.1 Contract gap: DLNA discovery ports
+### 4.1 RESOLVED in v2 — DLNA discovery ports
 
-Contract §5 says Jellyfin runs on host networking *because* that is "required
-for DLNA and client auto-discovery" — but the port table then lists only TCP
-8096 for Jellyfin.
+**Was:** contract v1 justified Jellyfin's host networking by citing DLNA and
+client auto-discovery, then opened only TCP 8096 — so discovery could not
+actually work. Host networking let Jellyfin *send* discovery traffic, but
+inbound probes from LAN clients were dropped.
 
-Auto-discovery does not run on 8096. It needs **UDP 1900** (SSDP) and **UDP
-7359** (Jellyfin's own discovery broadcast). With the firewall exactly as
-specified, inbound discovery probes from LAN clients are dropped, so
-auto-discovery will not work. Host networking gets Jellyfin the ability to
-*send*, not to *receive*.
+**Now:** v2 §5.1 adds **UDP 1900** (SSDP) and **UDP 7359** (Jellyfin's own
+broadcast), LAN-only. Implemented in `modules/networking.nix` as a second
+`extraInputRules` line. They are deliberately *not* on the tailscale0 port list:
+broadcast discovery does not work across a tailnet, so opening them there would
+be surface without function.
 
-Clients pointed explicitly at the server's address work perfectly, which is how
-most people use Jellyfin — so this may well be fine. **I did not add the ports.**
-If you want discovery, amend contract §5 first, then add to
-`modules/networking.nix`:
+### 4.2 RESOLVED in v2 — UDP 41641 is now disclosed
 
-```
-ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } udp dport { 1900, 7359 } accept
-```
+**Was:** `services.tailscale.openFirewall = true` opened UDP 41641 on all
+interfaces, and contract v1's table did not mention it — an undocumented open
+port on a default-deny box.
 
-### 4.2 A port is open that contract §5's table does not list: UDP 41641
+**Now:** v2 §5.1 lists it explicitly as Tailscale transport rather than an
+application port. Behaviour is unchanged; the disclosure is the fix. Without it
+peer traffic relays through DERP, which is slow for video. Nothing is forwarded
+at the router, so in practice it is LAN-reachable only. Set
+`openFirewall = false` if you would rather have the relay.
 
-`services.tailscale.openFirewall = true` opens **UDP 41641** on all interfaces.
-This is Tailscale's own transport, not an application port, which is why it is
-not in the §5 table — but it *is* an inbound port on a default-deny box, so you
-should know it is there.
+### 4.3 Still deliberate: `After=`, not `Requires=`
 
-Without it, Tailscale still works, but peer traffic falls back to relaying
-through a DERP server — slow for streaming video, and impolite to Tailscale's
-infrastructure. Nothing is port-forwarded at the router, so this is only
-reachable from your LAN in practice. Set `openFirewall = false` if you would
-rather have the relay.
+Contract v2 §3 specifies `After=docker.service tailscaled.service`, and that is
+what is implemented. A stricter `Requires=` would be defensible — as written, if
+docker is not running the unit starts and fails rather than pulling docker in —
+but the contract says ordering, and quietly upgrading it is not mine to do.
+Failing loudly is the wanted behaviour, and this was confirmed as correct on
+review.
 
-### 4.3 One deliberate under-implementation
+Note the *precondition* is a different mechanism from the *ordering*: ordering
+after `tailscaled.service` only means the daemon started, so v2 §3 also requires
+the bounded `ExecStartPre` poll for an actual IPv4 address on `tailscale0`. See
+§4.5.
 
-Contract §3 specifies the stack unit's ordering as `After=docker.service`. I
-implemented exactly that. A stricter `Requires=docker.service` would be
-defensible — as written, if docker is somehow not running the unit starts and
-fails rather than pulling docker in — but the contract says ordering, and
-quietly upgrading it is not mine to do. Failing loudly is a reasonable behaviour
-regardless.
+### 4.4 DONE — the stale build doc has been deleted
 
-### 4.4 The old build doc is stale
+`x17r2-jellyfin-build.md` contradicted the contract (UID 1000, `/opt/stack`,
+tmpfs owned 1000:1000) and both sessions correctly ignored it. Contract v2 §0
+now forbids committing pre-contract design docs, and the file has been removed
+so it cannot mislead a later session. The parts still worth having are folded
+into §8 below.
 
-`x17r2-jellyfin-build.md` disagrees with `contract.md`: it creates `media` at
-UID **1000**, mounts the transcode tmpfs `uid=1000,gid=1000`, and puts the stack
-at `/opt/stack`. The contract says 1500/1500 and `/opt/palimpsest-stack`.
-**I followed the contract everywhere.** Worth correcting or deleting that doc so
-a future session does not follow it.
+### 4.5 New in v2: the stack unit waits for a tailnet address
+
+The stack binds its admin UIs to this machine's tailnet address (v2 §5.2,
+`BIND_ADDR_TAILNET`), and Docker cannot bind an address that does not exist yet.
+
+`modules/containers.nix` now carries a bounded `ExecStartPre` that polls for an
+IPv4 address on `tailscale0` for 60 seconds and **exits non-zero** on timeout.
+Both paths were tested directly: 6 ms exit 0 against an interface that has an
+address, and a clean 60 s exit 1 with the intended journal line against one that
+does not.
+
+Consequence worth knowing: on a node where `tailscale up` has never been run,
+starting the stack fails after 60 seconds *by design*. INSTALL.md authenticates
+Tailscale (§11) before ever starting the stack (§14).
+
+### 4.6 Read v2 §5.2 before debugging an unreachable admin UI
+
+v2 added a contract-level rule about Docker's firewall bypass. Nothing in this
+repo implements it — exposure for published ports is controlled by the stack's
+bind address — but it changes how you *debug* this layer, so it is summarised in
+CLAUDE.md and at the top of `modules/networking.nix`.
+
+The short version: Docker publishes via DNAT in `PREROUTING`, which never
+traverses the `INPUT` chain this firewall lives in. For anything Docker
+publishes, these rules are the second layer. Opening a port here will not fix an
+unreachable admin UI and will only widen the firewall. Jellyfin is the exception
+— host-networked, not published by Docker, so 8096/1900/7359 are protected by
+this layer and nothing else.
 
 ---
 
@@ -438,3 +474,69 @@ journalctl -b -p err          # errors from this boot
 systemctl --failed            # what did not start
 journalctl -u palimpsest-stack -b
 ```
+
+---
+
+## 8. Salvaged from `x17r2-jellyfin-build.md` before deleting it
+
+Contract v2 §0 forbids keeping pre-contract design docs, because that file
+contradicted the contract (UID 1000, `/opt/stack`, tmpfs owned 1000:1000) and
+would eventually have misled someone. Most of its content is already
+implemented or captured elsewhere:
+
+| From the old doc | Where it lives now |
+|---|---|
+| BIOS settings table | INSTALL.md §1 |
+| Disk layout, transcode tmpfs | INSTALL.md §3, `modules/storage.nix` |
+| `intel-media-va-driver-non-free`, `vainfo` | `modules/graphics.nix` (as `intel-media-driver` + `vpl-gpu-rt`) |
+| Never-sleep `sed` into logind.conf | `modules/power.nix`, as proper NixOS options |
+| dGPU D3cold check | §3.1 above |
+| `/data` single-mount + hardlink rationale | `modules/storage.nix`, contract §2 |
+| Tailscale + ufw rules | `modules/networking.nix`, contract v2 §5.1 |
+| `smartd` | `modules/base.nix` |
+| DHCP reservation, no port forwarding | INSTALL.md §12 |
+
+What was **not** captured anywhere else is below. It is all **stack-layer**
+work — it belongs to `palimpsest-stack` and this session does not implement it —
+but it is recorded here so that deleting the file loses nothing.
+
+### Jellyfin transcode settings (stack layer)
+
+Dashboard → Playback → Transcoding:
+
+- Hardware acceleration: **Video Acceleration API (VAAPI)**
+- Device: `/dev/dri/renderD128`
+- Enable decode for: H264, HEVC, VP9, AV1
+- Enable **Intel Low-Power H.264/HEVC encoder** — materially lower power on
+  Alder Lake. This is the setting that depends on HuC being loaded; see §3.2.
+- Enable hardware tone mapping (VPP)
+- Transcode path: `/transcode` (which is `/data/transcode` on the host — the
+  8 GB tmpfs, per contract §2/§4)
+
+### How to tell a real hardware transcode from a silent CPU fallback
+
+This one is worth keeping verbatim, because the failure is silent — VAAPI falls
+back to software and everything still "works", just badly.
+
+Start a forced transcode, then on the host:
+
+```bash
+sudo intel_gpu_top
+```
+
+You want activity on the **Video** and **VideoEnhance** engines. If the CPU
+cores light up instead and those engines stay idle, VAAPI fell back to software.
+`intel-gpu-tools` is installed by this layer (`modules/graphics.nix`) precisely
+so this check is available.
+
+The real goal is to never see that screen: a client that direct-plays (Shield,
+recent Google TV, Apple TV + Infuse) means the server just serves bytes.
+
+### Maintenance advice worth keeping (stack layer)
+
+- Pin container image tags rather than `:latest` once the stack is stable.
+  Update deliberately, not automatically.
+- Back up `/opt/palimpsest-stack/*/config` (restic or similar). The media is
+  re-acquirable; your users, watch history and *arr configuration are not.
+- Recyclarr is worth adding later to keep quality profiles in sync with the
+  TRaSH guides.

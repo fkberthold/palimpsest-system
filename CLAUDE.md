@@ -25,8 +25,14 @@ an agent cannot cross is worth more than the convenience of crossing it.
 
 ## `contract.md` is the source of truth and you may not change it
 
-`contract.md` is the interface both halves are built against. **No value in it
-may be changed by an agent.** If you believe one is wrong, stop and say so.
+`contract.md` is the interface both halves are built against, currently at
+**version 2 (2026-08-04)**. **No value in it may be changed by an agent.** If you
+believe one is wrong, stop and say so — v2 exists precisely because both sessions
+flagged conflicts instead of working around them, and Frank amended the contract.
+
+Contract v2 §0 also forbids committing pre-contract design docs. `x17r2-jellyfin-build.md`
+was deleted for contradicting the contract; anything still useful from it is in
+NOTES.md §8. Do not reintroduce it.
 
 Values this repo implements, all fixed:
 
@@ -39,7 +45,7 @@ Values this repo implements, all fixed:
 | `/data/transcode` | 8 GB tmpfs |
 | `/opt/palimpsest-stack` | `media:media`, `0775` |
 | VAAPI | iHD (`intel-media-driver`), **never** legacy i965 |
-| Firewall | default-deny; 22 + 8096 from RFC1918 only; everything else `tailscale0` only |
+| Firewall | default-deny; 22 + 8096 + 5055 from RFC1918 only; UDP 1900/7359 LAN only; everything else `tailscale0` only; 41641/udp all interfaces (disclosed) |
 
 `scripts/verify-contract` checks all of it on a live machine. Run it after any
 change that touches identity, storage, or the firewall.
@@ -84,12 +90,54 @@ portable**. It is regenerated per machine by `nixos-generate-config`.
   `modules/containers.nix`. `systemctl enable` does **not** persist on NixOS.
 - **No `Restart=` on the stack unit.** Per-container `restart: unless-stopped`
   owns recovery; two layers restarting each other thrash.
+- **`After=`, not `Requires=`, on docker/tailscaled.** Contract v2 §3 specifies
+  ordering. Failing loudly when a dependency is missing is wanted, and this was
+  confirmed correct on review. Do not "strengthen" it.
+- **The stack unit's `ExecStartPre` waits for `tailscale0` to have an IPv4
+  address and FAILS after 60s.** The stack binds admin UIs to the tailnet
+  address and Docker cannot bind an address that does not exist. Ordering after
+  `tailscaled.service` is not sufficient — the daemon going active does not mean
+  the interface has an address. On an unauthenticated node this fails by design;
+  run `tailscale up` first.
+- **`/data/transcode` is in `RequiresMountsFor`** even though nothing breaks
+  without it. If the tmpfs fails to mount, the directory underneath still works,
+  and Jellyfin silently transcodes to the NVMe — the exact write wear this
+  design exists to prevent. Nothing else catches that.
 - **No `virtualisation.oci-containers`.** It would move the service list across
   the repo boundary into this repo.
 - **One nixpkgs input.** `claude-code` in 26.05 is current (2.1.187), so no
   second unstable input was needed. Do not add one casually.
 - **No credential anywhere** (contract §6) — no password, no auth key. The VM
   passwords in `modules/vm.nix` are VM-only and never reach the laptop.
+
+## Before you "fix" an unreachable service by opening a firewall port — READ THIS
+
+Contract v2 §5.2. **Docker bypasses this layer's firewall entirely for anything
+it publishes.**
+
+Docker publishes ports by DNAT in `PREROUTING`, which never traverses the
+`INPUT` chain where the NixOS firewall lives. A container published on `0.0.0.0`
+is reachable from the LAN *no matter what `modules/networking.nix` says*.
+
+Exposure for published services is therefore controlled primarily by the stack's
+**bind address** (`BIND_ADDR_TAILNET` / `BIND_ADDR_LAN` in `palimpsest-stack`,
+defaulting to `127.0.0.1` so an unconfigured stack fails closed). That is the
+other repo's file and **this session does not edit it** — report the problem
+instead.
+
+Practical consequences for debugging here:
+
+- An admin UI that is unreachable is almost certainly a **bind address** problem,
+  not a firewall problem. Opening a port in this repo will not fix it; it will
+  just widen the firewall while the real cause persists.
+- An admin UI that is reachable **when it should not be** is also a bind address
+  problem. The firewall rules are the second layer and cannot close it.
+- **The exception is Jellyfin.** It runs host-networked and is not published by
+  Docker at all, so 8096/tcp and 1900+7359/udp are protected by
+  `modules/networking.nix` and by nothing else. Those rules are load-bearing.
+
+Nothing in this repo implements §5.2; it is recorded because it changes what the
+rules in this repo *mean*.
 
 ## Known-fragile areas
 
@@ -105,8 +153,11 @@ portable**. It is regenerated per machine by `nixos-generate-config`.
 4. **`mkVMOverride` beats `mkForce`** in `modules/vm.nix`. VM filesystems must go
    through `virtualisation.fileSystems`; a `fileSystems` + `mkForce` override is
    silently discarded with no error. See the comment in that file.
-5. **Contract gap: DLNA discovery** needs UDP 1900/7359, which contract §5 does
-   not list. Flagged in NOTES.md §4.1, deliberately not implemented.
+5. **`nixpkgs.config` must not reference `pkgs`.** `allowUnfreePredicate` in
+   `modules/base.nix` takes `lib` from the module arguments. Reaching back
+   through `pkgs.lib` is circular by construction — `nixpkgs.config` is an input
+   to building `pkgs` — and happens to terminate only by accident of evaluation
+   order.
 
 ## Working here
 

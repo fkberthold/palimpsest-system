@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# verify-contract — check that this machine satisfies contract.md §7
+# verify-contract — check that this machine satisfies contract.md v2 §7.1
 #
 # Run this on palimpsest itself, AFTER install and first boot, BEFORE the
 # container stack is set up. Everything it checks is the system layer's
@@ -233,16 +233,80 @@ else
   note "no compose.yaml yet — expected; that file belongs to the palimpsest-stack repo"
 fi
 
+# --- The stack unit's contract v2 §3 properties -----------------------------
+# Read from the LIVE unit rather than the config, so this catches a machine
+# running an older generation than the repo it was built from.
+unit_after="$(systemctl show -p After --value palimpsest-stack.service 2>/dev/null || true)"
+unit_mounts="$(systemctl show -p RequiresMountsFor --value palimpsest-stack.service 2>/dev/null || true)"
+unit_pre="$(systemctl show -p ExecStartPre --value palimpsest-stack.service 2>/dev/null || true)"
+
+for dep in docker.service tailscaled.service; do
+  case " $unit_after " in
+    *" $dep "*) ok "stack unit is ordered After=$dep" ;;
+    *)          no "stack unit is missing After=$dep (contract v2 §3)" ;;
+  esac
+done
+
+for m in /data /data/transcode /opt/palimpsest-stack; do
+  case " $unit_mounts " in
+    *" $m "*) ok "stack unit has RequiresMountsFor=$m" ;;
+    *)        no "stack unit is missing RequiresMountsFor=$m (contract v2 §3)" ;;
+  esac
+done
+
+# The bounded tailscale0 wait. Without it the stack can start before the tailnet
+# address exists and every published admin UI fails to bind.
+if [[ -n "$unit_pre" ]]; then
+  ok "stack unit has an ExecStartPre precondition"
+else
+  no "stack unit has no ExecStartPre — the tailscale0 wait is missing (contract v2 §3)"
+fi
+
 if command -v nft >/dev/null 2>&1; then
   if nft list table inet nixos-fw >/dev/null 2>&1; then
     ok "nftables firewall table is loaded"
-    nft list table inet nixos-fw 2>/dev/null | grep -q '10.0.0.0/8' \
-      && ok "RFC1918 source rule is present" \
-      || no "RFC1918 source rule missing from the ruleset"
+    fw="$(nft list table inet nixos-fw 2>/dev/null)"
+
+    # Contract v2 §5.1 — the LAN TCP rule must cover SSH, Jellyfin AND
+    # Jellyseerr. 5055 moved into this rule in v2; before that it was
+    # tailnet-only, which put the family-facing request UI out of reach.
+    lan_tcp="$(printf '%s' "$fw" | grep '10.0.0.0/8' | grep 'tcp dport' || true)"
+    if [[ -n "$lan_tcp" ]]; then
+      ok "LAN (RFC1918) TCP rule is present"
+      for p in 22 8096 5055; do
+        printf '%s' "$lan_tcp" | grep -qE "(\{|[ ,])$p(,| |\})" \
+          && ok "  LAN rule covers tcp/$p" \
+          || no "  LAN rule does NOT cover tcp/$p (contract v2 §5.1)"
+      done
+    else
+      no "no RFC1918 TCP source rule in the ruleset (contract v2 §5.1)"
+    fi
+
+    # Contract v2 §5.1 — Jellyfin client auto-discovery, LAN only. Without
+    # these, host networking lets Jellyfin send discovery traffic but inbound
+    # probes are dropped, so clients must be pointed at an IP by hand.
+    lan_udp="$(printf '%s' "$fw" | grep '10.0.0.0/8' | grep 'udp dport' || true)"
+    if [[ -n "$lan_udp" ]]; then
+      for p in 1900 7359; do
+        printf '%s' "$lan_udp" | grep -qE "(\{|[ ,])$p(,| |\})" \
+          && ok "  LAN rule covers udp/$p (discovery)" \
+          || no "  LAN rule does NOT cover udp/$p (contract v2 §5.1)"
+      done
+    else
+      no "no RFC1918 UDP discovery rule — Jellyfin auto-discovery will not work (contract v2 §5.1)"
+    fi
+
+    # The tailnet-only admin UIs.
+    printf '%s' "$fw" | grep -q 'iifname .*tailscale0' \
+      && ok "tailscale0 interface rule is present" \
+      || no "no tailscale0 interface rule — admin UIs unreachable over the tailnet"
   else
     no "inet nixos-fw table is not loaded — the firewall is not up"
   fi
 fi
+
+# Contract v2 §5.2 — a reminder, not a check. This layer cannot verify it.
+note "§5.2: ports Docker PUBLISHES bypass this firewall (DNAT in PREROUTING). Exposure for those is the stack's bind address, not these rules. Verify with the LAN nmap in contract §7.2."
 
 systemctl is-active --quiet tailscaled \
   && ok "tailscaled is running" \

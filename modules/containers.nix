@@ -16,11 +16,52 @@
 # The practical consequence: editing compose.yaml needs no rebuild. Changing how
 # the stack is *launched* needs a rebuild. That is the seam.
 # =============================================================================
-{ config, lib, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
 
 let
   stackDir = "/opt/palimpsest-stack";
   composeFile = "${stackDir}/compose.yaml";
+
+  # Contract v2 §3 — the stack unit's start precondition.
+  #
+  # WHY THIS EXISTS AT ALL: the stack publishes its admin UIs bound to this
+  # machine's *tailnet* address (contract §5.2, `BIND_ADDR_TAILNET`), and Docker
+  # cannot bind an address that does not exist yet. `After=tailscaled.service`
+  # is necessary but NOT sufficient — the daemon reaching "active" only means
+  # the process started, not that the interface has been assigned an IPv4
+  # address. Between those two moments, `docker compose up -d` fails with a
+  # bind error that reads like a Docker problem and is not one.
+  #
+  # WHY IT FAILS RATHER THAN GIVING UP QUIETLY: contract §3 is explicit that a
+  # timeout must fail. A poll that gives up and returns success produces a
+  # half-started stack — some containers bound, some not — which presents the
+  # next morning as an assortment of unrelated-looking symptoms. Exiting
+  # non-zero produces one clear line in the journal instead.
+  #
+  # 60s is ample; tailscaled normally has an address within a second or two of
+  # starting on an already-authenticated node.
+  #
+  # NOTE ON FIRST BOOT: on a node that has never run `tailscale up`, there is no
+  # address to wait for and this will correctly fail after 60s. That is the
+  # intended behaviour, not a bug — see INSTALL.md, which authenticates
+  # Tailscale (§11) before ever starting the stack (§14).
+  #
+  # `ip` is referenced by absolute store path. `seq`/`sleep`/`grep` come from
+  # the default PATH NixOS gives every systemd service (coreutils + gnugrep),
+  # which is verified present in the generated unit.
+  waitForTailscale = pkgs.writeShellScript "wait-for-tailscale0" ''
+    for i in $(seq 1 60); do
+      ${pkgs.iproute2}/bin/ip -4 addr show tailscale0 2>/dev/null | grep -q 'inet ' && exit 0
+      sleep 1
+    done
+    echo "tailscale0 has no IPv4 address after 60s; stack ports will fail to bind" >&2
+    exit 1
+  '';
 
   # The docker CLI, by absolute store path. systemd units get almost no PATH, so
   # every ExecStart must name its binary in full.
@@ -80,23 +121,38 @@ in
     description = "palimpsest container stack (docker compose)";
     documentation = [ "file://${composeFile}" ];
 
-    # Contract §3: After=docker.service.
+    # Contract v2 §3: After=docker.service tailscaled.service.
     #
-    # Note this is ORDERING ONLY, per the contract, not a dependency: if docker
+    # Note this is ORDERING ONLY, per the contract, not a dependency: if either
     # is somehow not running, this unit will start and fail loudly rather than
-    # pulling docker in. Failing visibly is the intended behaviour. (Adding
+    # pulling them in. Failing visibly is the intended behaviour. (Adding
     # `requires = [ "docker.service" ]` would be defensible, but the contract
     # specifies ordering and I do not get to quietly upgrade it. See NOTES.md.)
-    after = [ "docker.service" ];
+    #
+    # tailscaled is ordered here as the *first half* of the tailnet
+    # precondition; the ExecStartPre poll below is the second half, because
+    # ordering alone does not guarantee the interface has an address.
+    after = [
+      "docker.service"
+      "tailscaled.service"
+    ];
 
-    # Contract §3 again, and this is what makes the `nofail` on /data safe.
+    # Contract v2 §3, and this is what makes the `nofail` on /data safe.
     #
     # RequiresMountsFor turns each path into a dependency on the mount unit that
     # provides it. If /data did not mount, this unit does not start — so the
     # stack can never write media into an empty directory sitting on the root
     # filesystem, which would silently break every hardlink in the system.
+    #
+    # /data/transcode is listed for a DIFFERENT and less obvious reason, added
+    # in contract v2. The tmpfs is not needed for correctness — if it fails to
+    # mount, the directory underneath still exists with the right ownership, so
+    # everything keeps working. That is exactly the problem: Jellyfin would
+    # silently transcode to the NVMe instead of to RAM, which is precisely the
+    # write wear this design exists to avoid, and nothing else would catch it.
     unitConfig.RequiresMountsFor = [
       "/data"
+      "/data/transcode"
       stackDir
     ];
 
@@ -115,6 +171,11 @@ in
       RemainAfterExit = true;
 
       WorkingDirectory = stackDir;
+
+      # Contract v2 §3 — bounded wait for tailscale0 to have an IPv4 address.
+      # Defined and explained in the `let` block at the top of this file.
+      # A non-zero exit here aborts the unit before ExecStart runs at all.
+      ExecStartPre = waitForTailscale;
 
       # Contract §3: `docker compose up -d` on start, `down` on stop.
       ExecStart = "${docker} compose -f ${composeFile} up -d";

@@ -5,22 +5,46 @@
 # internet, a very short list is reachable from the house, and everything else
 # is reachable only over Tailscale.
 #
-# Contract §5, implemented literally:
+# Contract v2 §5.1, implemented literally:
 #
-#   port  service            reachable from
-#   ----  -----------------  -----------------
-#     22  SSH                LAN + tailscale0
-#   8096  Jellyfin           LAN + tailscale0
-#   5055  Jellyseerr         tailscale0 only
-#   6767  Bazarr             tailscale0 only
-#   7878  Radarr             tailscale0 only
-#   8080  qBittorrent WebUI  tailscale0 only
-#   8081  SABnzbd            tailscale0 only
-#   8989  Sonarr             tailscale0 only
-#   9696  Prowlarr           tailscale0 only
+#   port          service                      reachable from
+#   ------------  ---------------------------  -----------------
+#   22/tcp        SSH                          LAN + tailscale0
+#   8096/tcp      Jellyfin                     LAN + tailscale0
+#   1900,7359/udp Jellyfin client discovery    LAN only
+#   5055/tcp      Jellyseerr                   LAN + tailscale0
+#   6767/tcp      Bazarr                       tailscale0 only
+#   7878/tcp      Radarr                       tailscale0 only
+#   8080/tcp      qBittorrent WebUI            tailscale0 only
+#   8081/tcp      SABnzbd                      tailscale0 only
+#   8989/tcp      Sonarr                       tailscale0 only
+#   9696/tcp      Prowlarr                     tailscale0 only
+#   41641/udp     Tailscale transport          all interfaces (disclosed, §5.1)
 #
 # Nothing is port-forwarded from the router, ever. Jellyfin has no rate limiting
 # and no MFA and is not built to sit on the open internet.
+#
+# ---------------------------------------------------------------------------
+# READ THIS BEFORE "FIXING" AN UNREACHABLE ADMIN UI — contract v2 §5.2
+# ---------------------------------------------------------------------------
+# For everything Docker PUBLISHES, the rules in this file are the SECOND layer,
+# not the first.
+#
+# Docker publishes ports by DNAT in PREROUTING, which never traverses the INPUT
+# chain where this firewall lives. A container published on 0.0.0.0 is reachable
+# from the LAN no matter what any rule below says. Exposure for published
+# services is controlled primarily by the stack's BIND ADDRESS
+# (`BIND_ADDR_TAILNET` / `BIND_ADDR_LAN` in palimpsest-stack), which defaults to
+# 127.0.0.1 so an unconfigured stack fails closed.
+#
+# So if an admin UI is unreachable, the bind address is the near-certain cause
+# and OPENING A PORT HERE WILL NOT FIX IT — it will just widen the firewall
+# while leaving the actual problem in place. Check the stack's bind address
+# first. That belongs to the other repo; this session does not edit it.
+#
+# The one thing these rules ARE solely responsible for: Jellyfin. It runs on
+# host networking and is not published by Docker at all, so 8096/1900/7359 are
+# protected by this file and nothing else.
 # =============================================================================
 { ... }:
 
@@ -102,8 +126,21 @@
     # This is nftables syntax, injected into the input chain of the inet
     # nixos-fw table. `ip saddr` matches IPv4 only, which is correct — RFC1918
     # is an IPv4 concept and there is deliberately no IPv6 equivalent rule here.
+    #
+    # TCP 5055 (Jellyseerr) is in the LAN rule as of contract v2. It is the
+    # family-facing request UI; confining it to the tailnet, as v1 did, put it
+    # out of reach of the people it exists for.
+    #
+    # UDP 1900/7359 are Jellyfin client auto-discovery — SSDP and Jellyfin's own
+    # broadcast. They are LAN-ONLY and deliberately absent from the tailscale0
+    # port list: discovery is a broadcast mechanism that does not work across a
+    # tailnet anyway, so opening them there would be pure surface for no
+    # function. Without these, host networking lets Jellyfin *send* discovery
+    # traffic but inbound probes are dropped, so clients silently have to be
+    # pointed at an IP by hand.
     extraInputRules = ''
-      ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } tcp dport { 22, 8096 } accept comment "contract §5: SSH + Jellyfin from LAN (RFC1918) only"
+      ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } tcp dport { 22, 8096, 5055 } accept comment "contract v2 §5.1: SSH + Jellyfin + Jellyseerr from LAN (RFC1918) only"
+      ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } udp dport { 1900, 7359 } accept comment "contract v2 §5.1: Jellyfin client auto-discovery, LAN only"
     '';
 
     # -------------------------------------------------------------------------
@@ -135,6 +172,12 @@
     # rude to Tailscale's infrastructure.
     #
     # This default is `false` in nixpkgs, so it genuinely has to be set.
+    #
+    # 41641/udp is open on ALL interfaces, which is why contract v2 §5.1 lists
+    # it explicitly — an undocumented open port on a default-deny box is worse
+    # than a documented one. It is Tailscale's transport, not an application
+    # port, and nothing is forwarded at the router, so in practice it is only
+    # reachable from the LAN.
     openFirewall = true;
   };
 
@@ -151,28 +194,15 @@
   # and rebuilds. It is a one-time manual step by design. See NOTES.md.
 
   # ---------------------------------------------------------------------------
-  # ⚠ CONTRACT GAP — flagged, NOT worked around. Read this.
+  # Resolved in contract v2 — kept as a record of why these rules exist
   # ---------------------------------------------------------------------------
-  # Contract §5 says Jellyfin runs on host networking because that is "required
-  # for DLNA and client auto-discovery" — but the port table then lists only TCP
-  # 8096 for Jellyfin.
+  # Two things this module flagged against contract v1 were amended rather than
+  # worked around, and are now implemented above:
   #
-  # Client auto-discovery does not run on 8096. It needs:
-  #     UDP 1900   SSDP  (DLNA discovery)
-  #     UDP 7359         (Jellyfin's own client auto-discovery broadcast)
+  #   - UDP 1900/7359 were missing, so the auto-discovery that v1 used to
+  #     justify host networking could not actually work. Now in the LAN rule.
+  #   - UDP 41641 was open but undocumented. Now disclosed in §5.1 and in the
+  #     table at the top of this file.
   #
-  # With the firewall as specified, host networking will get Jellyfin the
-  # ability to *send* discovery traffic, but inbound discovery probes from LAN
-  # clients will be dropped, so auto-discovery will not work. Clients that are
-  # pointed at the server's address explicitly will be entirely fine, which is
-  # how most people use Jellyfin anyway.
-  #
-  # I have NOT added these ports, because contract §5 is fixed and adding them
-  # is your call, not mine. If you decide auto-discovery matters, the change is
-  # to amend contract §5 and then add here:
-  #
-  #     ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } \
-  #       udp dport { 1900, 7359 } accept
-  #
-  # See NOTES.md, "Contract gap: DLNA discovery ports".
+  # Nothing here is outstanding against the contract.
 }

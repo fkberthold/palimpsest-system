@@ -4,7 +4,7 @@
 # Nothing in here is media-server-specific. This is the "make it a usable,
 # maintainable Linux box" layer.
 # =============================================================================
-{ pkgs, ... }:
+{ lib, pkgs, ... }:
 
 {
   # ---------------------------------------------------------------------------
@@ -73,8 +73,16 @@
   #
   # claude-code is the only unfree package here (verified against 26.05:
   # meta.license.shortName = "unfree").
-  nixpkgs.config.allowUnfreePredicate =
-    pkg: builtins.elem (pkgs.lib.getName pkg) [ "claude-code" ];
+  #
+  # `lib` comes from the module arguments, NOT from `pkgs.lib`. Both evaluate
+  # here, but referencing `pkgs` from inside `nixpkgs.config` is a documented
+  # infinite-recursion footgun: `nixpkgs.config` is an *input* to constructing
+  # `pkgs`, so reaching back through `pkgs` to fill it in is circular by
+  # construction. It happens to terminate in this case because `pkgs.lib` is
+  # resolved before the config is forced — which is exactly the kind of
+  # accident that stops being true after an unrelated change. The module
+  # argument `lib` is the same library with none of that risk.
+  nixpkgs.config.allowUnfreePredicate = pkg: builtins.elem (lib.getName pkg) [ "claude-code" ];
 
   # ---------------------------------------------------------------------------
   # Firmware
