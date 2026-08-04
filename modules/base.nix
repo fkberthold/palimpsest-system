@@ -158,6 +158,11 @@
     # installer from claude.ai cannot work here; this is the packaged build.
     claude-code
 
+    # An editor. NixOS's environment.defaultPackages is only perl/rsync/strace,
+    # so without this there is NO editor on the machine at all — which is a
+    # miserable discovery to make at the console at 2am.
+    vim
+
     # Small quality-of-life additions for a headless box you will be debugging
     # over SSH. Remove any you don't want.
     jq
@@ -165,4 +170,8 @@
     file
     dnsutils # dig, for when "is it DNS" needs answering
   ];
+
+  # Make vim the default for anything that consults $EDITOR (git commit,
+  # systemctl edit, visudo).
+  environment.variables.EDITOR = "vim";
 }
