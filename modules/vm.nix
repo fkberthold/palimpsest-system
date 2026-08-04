@@ -72,22 +72,54 @@
     # scripts/verify-contract exercises the same code path it will on the real
     # box and genuinely proves something.
     #
-    # mkForce is required because the real definition in modules/storage.nix is
-    # a normal (unprioritised) definition; without mkForce the two would be a
-    # conflict rather than an override.
-    fileSystems."/data" = lib.mkForce {
-      device = "tmpfs";
-      fsType = "tmpfs";
-      options = [
-        "size=2G"
-        "mode=0775"
-        "uid=1500"
-        "gid=1500"
-      ];
-    };
+    # ---- WHY THIS IS `virtualisation.fileSystems` AND NOT `fileSystems` ----
+    #
+    # This is a genuine trap and I got it wrong the first time. qemu-vm.nix does:
+    #
+    #     fileSystems = mkIf (cfg.fileSystems != {}) (mkVMOverride cfg.fileSystems);
+    #
+    # `mkVMOverride` is `mkOverride 10`, and `mkForce` is `mkOverride 50`. Lower
+    # number wins, so the VM REPLACES THE ENTIRE `fileSystems` ATTRSET with
+    # whatever is in `virtualisation.fileSystems` — and it beats mkForce while
+    # doing it.
+    #
+    # The failure mode is silent and misleading: writing
+    # `fileSystems."/data" = lib.mkForce {...}` here produces no error, no
+    # warning, and no mount. /data then quietly becomes an ordinary directory on
+    # the VM's root disk. I only caught it by booting the VM and running the
+    # verifier inside, which reported /data as living on /dev/vda.
+    #
+    # `virtualisation.fileSystems` is a mkMerge, so these entries are ADDED to
+    # the VM's defaults (root disk, 9p store share) rather than replacing them.
+    virtualisation.fileSystems = {
+      "/data" = {
+        device = "tmpfs";
+        fsType = "tmpfs";
+        options = [
+          "size=2G"
+          "mode=0775"
+          "uid=1500"
+          "gid=1500"
+        ];
+      };
 
-    # /data/transcode needs no override — it is already a tmpfs in the real
-    # config and behaves identically here.
+      # Must be restated for the same reason: the real definition in
+      # modules/storage.nix is discarded by mkVMOverride along with everything
+      # else. Smaller than the real 8 GB because the VM only has 4 GB of RAM.
+      "/data/transcode" = {
+        device = "tmpfs";
+        fsType = "tmpfs";
+        options = [
+          "size=1G"
+          "mode=0775"
+          "uid=1500"
+          "gid=1500"
+          "noexec"
+          "nosuid"
+          "nodev"
+        ];
+      };
+    };
 
     # -------------------------------------------------------------------------
     # Boot loader

@@ -34,6 +34,20 @@ expect() { # expect <label> <expected> <actual>
 printf '\033[1mpalimpsest — contract §7 verification\033[0m\n'
 printf 'host: %s   date: %s\n' "$(hostname)" "$(date -Is)"
 
+# Are we inside the test VM rather than on the real laptop? The VM has no Intel
+# iGPU passed through, so GPU checks CANNOT pass there and reporting them as
+# failures would train you to ignore red text. In a VM they are downgraded to
+# informational; on real hardware they are hard failures.
+virt="$(systemd-detect-virt 2>/dev/null || echo none)"
+if [[ "$virt" != "none" ]]; then
+  IN_VM=1
+  printf 'virtualisation: %s — GPU checks will be informational only\n' "$virt"
+else
+  IN_VM=0
+fi
+# `no` on real hardware, `note` in a VM.
+gpu_bad() { if [[ "$IN_VM" == "1" ]]; then note "$1"; else no "$1"; fi; }
+
 # -----------------------------------------------------------------------------
 hdr '§1  Identity — UIDs and GIDs the container stack hardcodes'
 # -----------------------------------------------------------------------------
@@ -117,9 +131,9 @@ if [[ -e /dev/dri/renderD128 ]]; then
   ok "/dev/dri/renderD128 exists"
   # The render node must be group-owned by render(303) or the container's
   # group_add: 303 buys it nothing.
-  expect "renderD128 group" "303" "$(stat -c '%g' /dev/dri/renderD128)"
+  rg="$(stat -c '%g' /dev/dri/renderD128)"; [[ "$rg" == "303" ]] && ok "renderD128 group (303)" || gpu_bad "renderD128 group — expected 303, got $rg; the container's group_add: 303 buys nothing without it"
 else
-  no "/dev/dri/renderD128 missing — check BIOS is Hybrid/Optimus, not discrete-only"
+  gpu_bad "/dev/dri/renderD128 missing — check BIOS is Hybrid/Optimus, not discrete-only"
 fi
 
 if command -v vainfo >/dev/null 2>&1; then
@@ -131,20 +145,20 @@ if command -v vainfo >/dev/null 2>&1; then
     if printf '%s' "$vaout" | grep -qi 'iHD'; then
       ok "driver is iHD"
     else
-      no "VAAPI is up but does not look like iHD — contract §4 requires intel-media-driver"
+      gpu_bad "VAAPI is up but does not look like iHD — contract §4 requires intel-media-driver"
     fi
     # Encode support is the thing that actually matters for transcoding.
     printf '%s' "$vaout" | grep -q 'VAProfileH264.*EncSlice' \
       && ok "H264 hardware ENCODE available" \
-      || no "no H264 encode profile — transcoding will fall back to CPU"
+      || gpu_bad "no H264 encode profile — transcoding will fall back to CPU"
     printf '%s' "$vaout" | grep -q 'VAProfileHEVCMain.*EncSlice' \
       && ok "HEVC hardware ENCODE available" \
       || note "no HEVC encode profile (decode-only is still usable)"
   else
-    no "vainfo returned no VAProfile lines — VAAPI is not working. Output was: $(printf '%s' "$vaout" | head -3)"
+    gpu_bad "vainfo returned no VAProfile lines — VAAPI is not working. Output was: $(printf '%s' "$vaout" | head -3)"
   fi
 else
-  no "vainfo not installed (expected from libva-utils)"
+  gpu_bad "vainfo not installed (expected from libva-utils)"
 fi
 
 # -----------------------------------------------------------------------------
@@ -189,12 +203,22 @@ systemctl is-active --quiet docker \
   && ok "docker is running" \
   || no "docker is not running"
 
-# The unit must EXIST but ship DISABLED (contract §3).
+# The unit must EXIST but not be wanted at boot (contract §3).
+#
+# NOTE ON `linked`: on NixOS, unit files live in /nix/store and are symlinked
+# into /etc/systemd/system. For a unit with no [Install] section — which is
+# exactly what `wantedBy = [ ]` produces — `systemctl is-enabled` reports
+# **linked**, not `disabled`. Both mean "will not start at boot", which is what
+# contract §3 asks for initially. Treating only `disabled` as a pass was a bug
+# in this script, found by running it inside the test VM.
 unit_state="$(systemctl is-enabled palimpsest-stack.service 2>&1 || true)"
 case "$unit_state" in
-  disabled) ok "palimpsest-stack.service exists and is disabled (as contract §3 requires initially)" ;;
-  enabled)  note "palimpsest-stack.service is ENABLED — fine once the stack works, deliberate?" ;;
-  *)        no  "palimpsest-stack.service state is '$unit_state' — expected disabled" ;;
+  linked|disabled)
+    ok "palimpsest-stack.service exists and will not start at boot (state: $unit_state) — as contract §3 requires initially" ;;
+  enabled|enabled-runtime|linked-runtime)
+    note "palimpsest-stack.service WILL start at boot (state: $unit_state) — correct once the stack works; deliberate?" ;;
+  *)
+    no "palimpsest-stack.service state is '$unit_state' — expected linked or disabled. Does the unit exist?" ;;
 esac
 
 # The compose file is owned by the OTHER repo. Its absence is expected and
