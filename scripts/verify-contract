@@ -166,7 +166,24 @@ hdr 'Power — dGPU asleep, machine never sleeps'
 # -----------------------------------------------------------------------------
 # Not strictly contract §7, but this is the cheapest moment to catch it.
 
-nvaddr="$(lspci -Dnn 2>/dev/null | grep -i nvidia | head -1 | cut -d' ' -f1)"
+# Find the dGPU WITHOUT waking it.
+#
+# This deliberately does NOT use lspci. lspci reads PCI config space, and the
+# kernel must runtime-resume a D3cold device to service that read — so calling
+# it here powered the card on and the very next line then reported D0. The
+# check destroyed the state it was checking, and reported a working
+# configuration as broken.
+#
+# sysfs `vendor` and `class` are cached from enumeration and touch no hardware,
+# so reading them leaves a suspended device suspended. 0x10de = NVIDIA,
+# 0x030000 = VGA controller (skips the HDMI audio function at .1).
+nvaddr=""
+for _d in /sys/bus/pci/devices/*/; do
+  [[ "$(cat "$_d/vendor" 2>/dev/null)" == "0x10de" ]] || continue
+  [[ "$(cat "$_d/class"  2>/dev/null)" == "0x030000" ]] || continue
+  nvaddr="$(basename "$_d")"
+  break
+done
 if [[ -n "$nvaddr" ]]; then
   pstate="$(cat "/sys/bus/pci/devices/$nvaddr/power_state" 2>/dev/null || echo unknown)"
   if [[ "$pstate" == "D3cold" ]]; then

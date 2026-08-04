@@ -189,6 +189,18 @@ regression rather than an open question.
 are different claims. The first does not imply the second, and on a laptop the
 gap between them is 10-15 W.
 
+**And a second lesson, from the check itself.** After the udev rule landed, a
+manual read showed `D3cold` but `scripts/verify-contract` reported `D0` seconds
+later. The rule was fine; the *check* was wrong. It located the card with
+`lspci`, which reads PCI **config space** — and the kernel must runtime-resume a
+D3cold device to service that read. The check powered the GPU on and then
+faithfully reported that the GPU was on.
+
+The script now finds the device by reading `vendor` and `class` from sysfs,
+which are cached from enumeration and touch no hardware. If you ever need to
+observe a suspended device's state, **do not use `lspci`** — it is not a passive
+observer. `cat /sys/bus/pci/devices/<addr>/power_state` is.
+
 ### 3.2 GuC/HuC firmware for low-power encode — probably fine, unconfirmed
 
 Jellyfin's "Intel Low-Power H.264/HEVC encoder" needs HuC authenticated. Recent
