@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# verify-contract — check that this machine satisfies contract.md v2 §7.1
+# verify-contract — check that this machine satisfies contract.md v3 §7.1
 #
 # Run this on palimpsest itself, AFTER install and first boot, BEFORE the
 # container stack is set up. Everything it checks is the system layer's
@@ -267,33 +267,50 @@ if command -v nft >/dev/null 2>&1; then
     ok "nftables firewall table is loaded"
     fw="$(nft list table inet nixos-fw 2>/dev/null)"
 
-    # Contract v2 §5.1 — the LAN TCP rule must cover SSH, Jellyfin AND
-    # Jellyseerr. 5055 moved into this rule in v2; before that it was
-    # tailnet-only, which put the family-facing request UI out of reach.
+    # Contract v3 §5.1 — the LAN TCP rule covers ONLY host-bound services.
+    #
+    # 22 (sshd) and 8096 (host-networked Jellyfin) genuinely traverse INPUT, so
+    # asserting them proves something.
+    #
+    # There is deliberately NO assertion for tcp/5055 here. It was asserted
+    # under v2 and the assertion was worthless: Jellyseerr is Docker-published,
+    # its traffic is DNAT'd in PREROUTING and never reaches INPUT, so the check
+    # passed while proving nothing about whether Jellyseerr was reachable or
+    # from where. A green check that means nothing is worse than no check,
+    # because it spends the reader's trust. 5055 is verified by the `ss`
+    # listener check in contract v3 §7.2 instead — see the note below.
     lan_tcp="$(printf '%s' "$fw" | grep '10.0.0.0/8' | grep 'tcp dport' || true)"
     if [[ -n "$lan_tcp" ]]; then
       ok "LAN (RFC1918) TCP rule is present"
-      for p in 22 8096 5055; do
+      for p in 22 8096; do
         printf '%s' "$lan_tcp" | grep -qE "(\{|[ ,])$p(,| |\})" \
           && ok "  LAN rule covers tcp/$p" \
-          || no "  LAN rule does NOT cover tcp/$p (contract v2 §5.1)"
+          || no "  LAN rule does NOT cover tcp/$p (contract v3 §5.1)"
       done
+      # The inverse assertion: a Docker-published port appearing here means
+      # someone has re-added an inert rule, which v3 removed on purpose.
+      if printf '%s' "$lan_tcp" | grep -qE "(\{|[ ,])(5055|6767|7878|8080|8081|8989|9696)(,| |\})"; then
+        no "  LAN rule names a Docker-published port — inert, and removed in v3. See contract §5.2."
+      else
+        ok "  LAN rule names no Docker-published ports (contract v3 §5.2)"
+      fi
     else
-      no "no RFC1918 TCP source rule in the ruleset (contract v2 §5.1)"
+      no "no RFC1918 TCP source rule in the ruleset (contract v3 §5.1)"
     fi
 
-    # Contract v2 §5.1 — Jellyfin client auto-discovery, LAN only. Without
-    # these, host networking lets Jellyfin send discovery traffic but inbound
-    # probes are dropped, so clients must be pointed at an IP by hand.
+    # Contract v3 §5.1 — Jellyfin client auto-discovery, LAN only. These are
+    # host networking, so unlike 5055 they really are enforced here. Without
+    # them, Jellyfin can send discovery traffic but inbound probes are dropped
+    # and clients must be pointed at an IP by hand.
     lan_udp="$(printf '%s' "$fw" | grep '10.0.0.0/8' | grep 'udp dport' || true)"
     if [[ -n "$lan_udp" ]]; then
       for p in 1900 7359; do
         printf '%s' "$lan_udp" | grep -qE "(\{|[ ,])$p(,| |\})" \
           && ok "  LAN rule covers udp/$p (discovery)" \
-          || no "  LAN rule does NOT cover udp/$p (contract v2 §5.1)"
+          || no "  LAN rule does NOT cover udp/$p (contract v3 §5.1)"
       done
     else
-      no "no RFC1918 UDP discovery rule — Jellyfin auto-discovery will not work (contract v2 §5.1)"
+      no "no RFC1918 UDP discovery rule — Jellyfin auto-discovery will not work (contract v3 §5.1)"
     fi
 
     # The tailnet-only admin UIs.
@@ -305,8 +322,11 @@ if command -v nft >/dev/null 2>&1; then
   fi
 fi
 
-# Contract v2 §5.2 — a reminder, not a check. This layer cannot verify it.
-note "§5.2: ports Docker PUBLISHES bypass this firewall (DNAT in PREROUTING). Exposure for those is the stack's bind address, not these rules. Verify with the LAN nmap in contract §7.2."
+# Contract v3 §5.2 — a signpost, not a check. Nothing this script can run
+# before the stack exists says anything about Docker-published exposure.
+note "§5.2: Docker-published ports (5055, 6767, 7878, 8080, 8081, 8989, 9696) bypass this firewall entirely — DNAT in PREROUTING never reaches INPUT. They are NOT verified by this script and no rule here governs them."
+note "  To verify those, after stack bring-up run the contract §7.2 listener check:  ss -ltnp | awk '\$4 !~ /^\\[/ {print \$4}' | sort -u"
+note "  No Docker-published port may show 0.0.0.0: or *: — 5055 must appear twice (LAN addr + tailnet addr), the six admin UIs on the tailnet addr only."
 
 systemctl is-active --quiet tailscaled \
   && ok "tailscaled is running" \

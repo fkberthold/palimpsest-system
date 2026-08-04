@@ -89,6 +89,13 @@ let
   #     journalctl -u palimpsest-stack -f
   #
   # When you are happy, change this to `true`, rebuild, and it comes up at boot.
+  #
+  # FLIPPING THIS CHANGES TWO THINGS, not one. As well as making the unit
+  # wanted at boot, it switches on the contract v3 §3 restart policy
+  # (`Restart=on-failure`, `RestartSec=30`, bounded to 5 attempts per 10
+  # minutes). That is deliberate: an unattended boot needs to recover from a
+  # slow tailnet by itself, whereas a unit you started by hand should fail in
+  # front of you rather than silently retrying while you read the journal.
   enableAtBoot = false;
 in
 {
@@ -150,11 +157,25 @@ in
     # everything keeps working. That is exactly the problem: Jellyfin would
     # silently transcode to the NVMe instead of to RAM, which is precisely the
     # write wear this design exists to avoid, and nothing else would catch it.
-    unitConfig.RequiresMountsFor = [
-      "/data"
-      "/data/transcode"
-      stackDir
-    ];
+    unitConfig = {
+      RequiresMountsFor = [
+        "/data"
+        "/data/transcode"
+        stackDir
+      ];
+    }
+    // lib.optionalAttrs enableAtBoot {
+      # Contract v3 §3 — the rate limit half of the enabled-at-boot restart
+      # policy. See the long note on Restart= in serviceConfig below.
+      #
+      # These live in [Unit], NOT [Service]. systemd moved StartLimitIntervalSec
+      # and StartLimitBurst to the [Unit] section in v229; left in [Service]
+      # they are parsed but ignored, which would silently give an UNBOUNDED
+      # restart loop — the exact opposite of what they are here to do.
+      # `unitConfig` is NixOS's [Unit] section, so this is correct placement.
+      StartLimitIntervalSec = 600;
+      StartLimitBurst = 5;
+    };
 
     # Ships disabled. See the long comment on `enableAtBoot` above.
     wantedBy = lib.optional enableAtBoot "multi-user.target";
@@ -195,6 +216,42 @@ in
       # something hangs we still finish the shutdown rather than blocking a
       # reboot forever.
       TimeoutStopSec = 300;
+    }
+    // lib.optionalAttrs enableAtBoot {
+      # -----------------------------------------------------------------------
+      # Contract v3 §3 — restart policy, ONLY when enabled at boot
+      # -----------------------------------------------------------------------
+      # WHY THIS DOES NOT CONTRADICT "no restart policy; per-container
+      # `restart: unless-stopped` handles recovery".
+      #
+      # That rule is about a specific hazard: systemd and Docker BOTH trying to
+      # manage containers that are already running. Two supervisors re-running
+      # `up -d` underneath a daemon that is itself restarting containers
+      # produces thrashing that is genuinely hard to read in a journal. That
+      # hazard is real and this does not reintroduce it.
+      #
+      # This governs a completely different event: a unit that NEVER STARTED.
+      # If the ExecStartPre tailscale0 poll times out at boot — a slow tailnet,
+      # a DERP round-trip, tailscaled taking longer than usual to get an
+      # address — the unit fails before `docker compose` runs at all. There are
+      # no containers running for Docker's own restart policy to recover,
+      # because none were ever created. Without this, the stack simply stays
+      # down until a human notices, which on a headless box could be days.
+      #
+      # So: Docker owns recovery for containers that fell over. systemd owns
+      # recovery for a start that never happened. No overlap.
+      Restart = "on-failure";
+      RestartSec = 30;
+
+      # `Restart = "always"` would be rejected here — systemd does not permit it
+      # for Type=oneshot. `on-failure` is permitted and is what we want anyway:
+      # a clean `systemctl stop` must stay stopped.
+      #
+      # Bounded by StartLimitIntervalSec=600 / StartLimitBurst=5 in unitConfig
+      # above: five attempts in ten minutes, then it gives up and stays failed.
+      # A transiently slow tailnet self-heals; a genuinely broken stack stops
+      # and waits for a human instead of looping forever and filling the
+      # journal.
     };
 
     # Contract §3: "Unit restart policy: None. Per-container

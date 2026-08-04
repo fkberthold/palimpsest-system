@@ -20,7 +20,7 @@ Pinned commit: `nixos-26.05` at `531670d871c0e29724a02f3cbcac170adc65b58c`
 
 **The config was also booted.** I built the test VM, added a temporary oneshot
 service that runs `scripts/verify-contract` at boot, and ran it under KVM. Result
-against **contract v2**: **42 passed, 0 failed, 5 informational** (the
+against **contract v3**: **42 passed, 0 failed, 7 informational** (the
 informational ones are the GPU checks, which no VM can pass, plus the §5.2
 reminder). So the following are observed behaviour on a running system, not
 predictions:
@@ -34,8 +34,8 @@ predictions:
 - docker running; `palimpsest-stack.service` present and **not** started at boot
 - the stack unit carries `After=docker.service tailscaled.service`, all three
   `RequiresMountsFor` paths including `/data/transcode`, and an `ExecStartPre`
-- the firewall's LAN rule covers tcp/22, tcp/8096, tcp/5055 and udp/1900+7359,
-  and the tailscale0 interface rule is present
+- the firewall's LAN rule covers tcp/22, tcp/8096 and udp/1900+7359, names no
+  Docker-published port, and the tailscale0 interface rule is present
 - **the hardlink test passes** — `/data/torrents` → `/data/media`, same inode
 
 The `ExecStartPre` tailscale0 wait was tested separately, since the stack unit
@@ -255,7 +255,7 @@ generated artifact (`nft list ruleset`, the unit text) or boot it.
 
 ## 4. Contract observations
 
-This config is built against **contract v2 (2026-08-04)**. Everything this layer
+This config is built against **contract v3 (2026-08-04)**. Everything this layer
 flagged against v1 was amended in v2 rather than worked around, which is the
 outcome the flagging was for. Kept here as a record of why the rules look the
 way they do.
@@ -337,6 +337,56 @@ unreachable admin UI and will only widen the firewall. Jellyfin is the exception
 this layer and nothing else.
 
 ---
+
+### 4.7 v3 corrected a defect in v2 that this layer had implemented faithfully
+
+Worth recording as its own lesson, because nothing in this repo was wrong by its
+own lights.
+
+v2 §5.2 stated that LAN-published services were bounded by host-firewall source
+rules. That could not be true, and v2's own opening paragraph said why: Docker
+DNATs published ports in `PREROUTING`, so they never reach `INPUT`. This layer
+implemented the table as written — 5055 went into the RFC1918 rule, and the six
+admin-UI ports sat on the `tailscale0` list — and the verifier asserted them and
+passed. A wrong contract propagates *because* both halves trust it.
+
+**What changed in v3:** no `INPUT` rule may name a Docker-published port. 5055
+came out of the RFC1918 rule; 5055 and 6767/7878/8080/8081/8989/9696 came out of
+the `tailscale0` list. The firewall now contains only host-bound services — 22,
+8096, and udp 1900/7359. The verifier's tcp/5055 assertion was deleted and
+replaced with the inverse: a check that **no** Docker-published port appears.
+
+**Real exposure did not change by one packet.** Those rules were never
+consulted. What was removed was a false belief — which over a five-year life is
+the more dangerous of the two.
+
+**How to catch this class of thing:** ask whether traffic to a port actually
+reaches `INPUT` before writing a rule for it. Confirmed while implementing v3:
+`networking.firewall.filterForward` defaults to `false`, so this config does not
+filter forwarding either — there is genuinely no host-firewall involvement in
+Docker-published traffic in either direction.
+
+Docker-published exposure cannot be verified by this layer at all. The check
+with teeth is contract §7.2's `ss -ltnp` listener scan, run after bring-up.
+
+### 4.8 New in v3: restart policy, but only when enabled at boot
+
+`Restart=on-failure`, `RestartSec=30`, `StartLimitIntervalSec=600`,
+`StartLimitBurst=5` — applied only when `enableAtBoot` is `true`. While the unit
+ships disabled it has no restart policy at all, so a hand-started unit fails in
+front of you instead of retrying while you read the journal.
+
+This does not contradict "no restart policy; per-container `restart:
+unless-stopped` handles recovery". That rule prevents systemd and Docker
+fighting over *running* containers. This covers a unit that **never started** —
+if the tailscale0 poll times out at boot, no container was ever created, so
+Docker has nothing to recover and the stack would otherwise stay down until a
+human noticed.
+
+Both branches were verified by generating the unit each way. Note
+`StartLimitIntervalSec`/`StartLimitBurst` are emitted into **`[Unit]`**, not
+`[Service]` — systemd moved them in v229 and ignores them in `[Service]`, which
+would have produced an unbounded restart loop instead of a bounded one.
 
 ## 5. What you must do by hand
 

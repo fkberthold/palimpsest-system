@@ -26,11 +26,13 @@ an agent cannot cross is worth more than the convenience of crossing it.
 ## `contract.md` is the source of truth and you may not change it
 
 `contract.md` is the interface both halves are built against, currently at
-**version 2 (2026-08-04)**. **No value in it may be changed by an agent.** If you
-believe one is wrong, stop and say so — v2 exists precisely because both sessions
-flagged conflicts instead of working around them, and Frank amended the contract.
+**version 3 (2026-08-04)**. **No value in it may be changed by an agent.** If you
+believe one is wrong, stop and say so — v2 and v3 both exist because conflicts
+were flagged rather than worked around, and Frank amended the contract. v3 in
+particular corrected a defect in v2 that *both* halves had faithfully
+implemented: a contract can be wrong, and trusting it is not a defence.
 
-Contract v2 §0 also forbids committing pre-contract design docs. `x17r2-jellyfin-build.md`
+Contract §0 also forbids committing pre-contract design docs. `x17r2-jellyfin-build.md`
 was deleted for contradicting the contract; anything still useful from it is in
 NOTES.md §8. Do not reintroduce it.
 
@@ -45,7 +47,7 @@ Values this repo implements, all fixed:
 | `/data/transcode` | 8 GB tmpfs |
 | `/opt/palimpsest-stack` | `media:media`, `0775` |
 | VAAPI | iHD (`intel-media-driver`), **never** legacy i965 |
-| Firewall | default-deny; 22 + 8096 + 5055 from RFC1918 only; UDP 1900/7359 LAN only; everything else `tailscale0` only; 41641/udp all interfaces (disclosed) |
+| Firewall | default-deny. **Host-bound services only:** 22 + 8096 from RFC1918 and from `tailscale0`; UDP 1900/7359 LAN only; 41641/udp all interfaces (disclosed). Docker-published ports appear nowhere — see §5.2 below. |
 
 `scripts/verify-contract` checks all of it on a live machine. Run it after any
 change that touches identity, storage, or the firewall.
@@ -88,11 +90,17 @@ portable**. It is regenerated per machine by `nixos-generate-config`.
   sources only", so the LAN rule is raw nft in `extraInputRules`.
 - **The stack unit ships disabled** via `enableAtBoot` in
   `modules/containers.nix`. `systemctl enable` does **not** persist on NixOS.
-- **No `Restart=` on the stack unit.** Per-container `restart: unless-stopped`
-  owns recovery; two layers restarting each other thrash.
-- **`After=`, not `Requires=`, on docker/tailscaled.** Contract v2 §3 specifies
+- **`After=`, not `Requires=`, on docker/tailscaled.** Contract v3 §3 specifies
   ordering. Failing loudly when a dependency is missing is wanted, and this was
   confirmed correct on review. Do not "strengthen" it.
+- **The stack unit has NO restart policy while `enableAtBoot = false`, and
+  gains one when it is `true`** (`Restart=on-failure`, `RestartSec=30`,
+  `StartLimitIntervalSec=600`, `StartLimitBurst=5`). Not a contradiction of the
+  per-container recovery rule: that rule stops systemd fighting Docker over
+  *running* containers; this covers a unit that **never started** (e.g. the
+  tailscale0 poll timing out at boot), where no container exists for Docker to
+  recover. `StartLimit*` must be in `unitConfig` — systemd reads them from
+  `[Unit]`, and in `[Service]` they are ignored, giving an unbounded loop.
 - **The stack unit's `ExecStartPre` waits for `tailscale0` to have an IPv4
   address and FAILS after 60s.** The stack binds admin UIs to the tailnet
   address and Docker cannot bind an address that does not exist. Ordering after
@@ -110,34 +118,46 @@ portable**. It is regenerated per machine by `nixos-generate-config`.
 - **No credential anywhere** (contract §6) — no password, no auth key. The VM
   passwords in `modules/vm.nix` are VM-only and never reach the laptop.
 
-## Before you "fix" an unreachable service by opening a firewall port — READ THIS
+## Before you add a firewall port — READ THIS
 
-Contract v2 §5.2. **Docker bypasses this layer's firewall entirely for anything
-it publishes.**
+Contract v3 §5.2. **For a Docker-published port there is no host-firewall layer
+at all.** Not a weaker one, not a second one. None.
 
-Docker publishes ports by DNAT in `PREROUTING`, which never traverses the
-`INPUT` chain where the NixOS firewall lives. A container published on `0.0.0.0`
-is reachable from the LAN *no matter what `modules/networking.nix` says*.
+Docker DNATs published ports in `PREROUTING`; the destination is rewritten to
+the container before the packet reaches `INPUT`, which is the chain this
+firewall lives in. The packet is then forwarded, and this config does not filter
+forwarding either (`networking.firewall.filterForward` is left at its default
+`false` — verified). A rule here naming a published port is not weak, it is
+**never consulted**.
 
-Exposure for published services is therefore controlled primarily by the stack's
-**bind address** (`BIND_ADDR_TAILNET` / `BIND_ADDR_LAN` in `palimpsest-stack`,
-defaulting to `127.0.0.1` so an unconfigured stack fails closed). That is the
-other repo's file and **this session does not edit it** — report the problem
-instead.
+So the rules in `modules/networking.nix` exist for exactly one category:
+**services that bind on the host.** Today that is sshd (22) and host-networked
+Jellyfin (8096, 1900, 7359). Nothing else. Everything Docker publishes is
+governed solely by its bind address (`BIND_ADDR_TAILNET` / `BIND_ADDR_LAN` in
+`palimpsest-stack`) — the other repo's file, which **this session does not
+edit**. Report the problem instead.
 
-Practical consequences for debugging here:
+Consequences:
 
-- An admin UI that is unreachable is almost certainly a **bind address** problem,
-  not a firewall problem. Opening a port in this repo will not fix it; it will
-  just widen the firewall while the real cause persists.
-- An admin UI that is reachable **when it should not be** is also a bind address
-  problem. The firewall rules are the second layer and cannot close it.
-- **The exception is Jellyfin.** It runs host-networked and is not published by
-  Docker at all, so 8096/tcp and 1900+7359/udp are protected by
-  `modules/networking.nix` and by nothing else. Those rules are load-bearing.
+- An admin UI that is unreachable is a **bind address** problem. Adding a port
+  here cannot fix it and only widens the firewall.
+- An admin UI reachable **when it should not be** is also a bind address
+  problem. No rule here can close it.
+- **THE ONE PATH BACK:** if a service ever moves from Docker publishing to host
+  networking, it stops being covered by its bind address and starts needing a
+  rule here. **Add it at that time.** That is the only circumstance in which the
+  port lists in `modules/networking.nix` should grow.
 
-Nothing in this repo implements §5.2; it is recorded because it changes what the
-rules in this repo *mean*.
+Contract v3 removed 5055 *and* the six admin-UI ports (6767, 7878, 8080, 8081,
+8989, 9696) from this layer for exactly this reason — under v2 they sat in the
+RFC1918 rule and the `tailscale0` list, read as protection, and constrained
+nothing. **Do not restore them.** Removing an inert rule changed real exposure
+by zero packets; what it removed was a false belief.
+
+This layer cannot verify Docker-published exposure at all. The check with teeth
+is contract §7.2's listener scan, run after stack bring-up:
+`ss -ltnp | awk '$4 !~ /^\[/ {print $4}' | sort -u` — no published port may show
+`0.0.0.0:` or `*:`.
 
 ## Known-fragile areas
 
@@ -153,7 +173,12 @@ rules in this repo *mean*.
 4. **`mkVMOverride` beats `mkForce`** in `modules/vm.nix`. VM filesystems must go
    through `virtualisation.fileSystems`; a `fileSystems` + `mkForce` override is
    silently discarded with no error. See the comment in that file.
-5. **`nixpkgs.config` must not reference `pkgs`.** `allowUnfreePredicate` in
+5. **An inert rule is worse than no rule.** v2 put 5055 in the RFC1918 rule and
+   six admin-UI ports on `tailscale0`; all were Docker-published, so `INPUT`
+   never saw them. They passed review, passed a ruleset grep, and passed the
+   verifier — while constraining nothing. When adding any rule here, first ask
+   whether traffic to that port actually reaches `INPUT`.
+6. **`nixpkgs.config` must not reference `pkgs`.** `allowUnfreePredicate` in
    `modules/base.nix` takes `lib` from the module arguments. Reaching back
    through `pkgs.lib` is circular by construction — `nixpkgs.config` is an input
    to building `pkgs` — and happens to terminate only by accident of evaluation

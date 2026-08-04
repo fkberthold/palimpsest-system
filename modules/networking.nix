@@ -5,46 +5,60 @@
 # internet, a very short list is reachable from the house, and everything else
 # is reachable only over Tailscale.
 #
-# Contract v2 §5.1, implemented literally:
+# Contract v3 §5.1. Note the "enforced by" column — it is the whole point:
 #
-#   port          service                      reachable from
-#   ------------  ---------------------------  -----------------
-#   22/tcp        SSH                          LAN + tailscale0
-#   8096/tcp      Jellyfin                     LAN + tailscale0
-#   1900,7359/udp Jellyfin client discovery    LAN only
-#   5055/tcp      Jellyseerr                   LAN + tailscale0
-#   6767/tcp      Bazarr                       tailscale0 only
-#   7878/tcp      Radarr                       tailscale0 only
-#   8080/tcp      qBittorrent WebUI            tailscale0 only
-#   8081/tcp      SABnzbd                      tailscale0 only
-#   8989/tcp      Sonarr                       tailscale0 only
-#   9696/tcp      Prowlarr                     tailscale0 only
-#   41641/udp     Tailscale transport          all interfaces (disclosed, §5.1)
+#   port          service                    reachable from     enforced by
+#   ------------  -------------------------  -----------------  ----------------
+#   22/tcp        SSH                        LAN + tailscale0   THIS FILE
+#   8096/tcp      Jellyfin (host networking) LAN + tailscale0   THIS FILE
+#   1900,7359/udp Jellyfin discovery         LAN only           THIS FILE
+#   5055/tcp      Jellyseerr                 LAN + tailscale0   bind address
+#   6767/tcp      Bazarr                     tailscale0 only    bind address
+#   7878/tcp      Radarr                     tailscale0 only    bind address
+#   8080/tcp      qBittorrent WebUI          tailscale0 only    bind address
+#   8081/tcp      SABnzbd                    tailscale0 only    bind address
+#   8989/tcp      Sonarr                     tailscale0 only    bind address
+#   9696/tcp      Prowlarr                   tailscale0 only    bind address
+#   41641/udp     Tailscale transport        all interfaces     — (disclosed)
+#
+# THIS FILE IMPLEMENTS ONLY THE FOUR ROWS MARKED "THIS FILE". The rows marked
+# "bind address" are the stack's business and appear nowhere below.
 #
 # Nothing is port-forwarded from the router, ever. Jellyfin has no rate limiting
 # and no MFA and is not built to sit on the open internet.
 #
 # ---------------------------------------------------------------------------
-# READ THIS BEFORE "FIXING" AN UNREACHABLE ADMIN UI — contract v2 §5.2
+# READ THIS BEFORE ADDING A PORT — contract v3 §5.2
 # ---------------------------------------------------------------------------
-# For everything Docker PUBLISHES, the rules in this file are the SECOND layer,
-# not the first.
+# For a Docker-published port there is NO host-firewall layer. Not a weak one,
+# not a second one — none.
 #
-# Docker publishes ports by DNAT in PREROUTING, which never traverses the INPUT
-# chain where this firewall lives. A container published on 0.0.0.0 is reachable
-# from the LAN no matter what any rule below says. Exposure for published
-# services is controlled primarily by the stack's BIND ADDRESS
-# (`BIND_ADDR_TAILNET` / `BIND_ADDR_LAN` in palimpsest-stack), which defaults to
-# 127.0.0.1 so an unconfigured stack fails closed.
+# Docker DNATs published ports in PREROUTING. The destination address is
+# rewritten to the container before the packet reaches INPUT, so the packet
+# never enters the chain this firewall lives in. It is then forwarded, and this
+# config does not filter forwarding either (`networking.firewall.filterForward`
+# is left at its default of false). A rule here naming a published port is not
+# wrong, it is NEVER CONSULTED.
 #
-# So if an admin UI is unreachable, the bind address is the near-certain cause
-# and OPENING A PORT HERE WILL NOT FIX IT — it will just widen the firewall
-# while leaving the actual problem in place. Check the stack's bind address
-# first. That belongs to the other repo; this session does not edit it.
+# So the rules below exist for exactly one category: SERVICES THAT BIND ON THE
+# HOST. Today that is sshd and host-networked Jellyfin, and nothing else.
+# Everything Docker publishes is governed solely by its bind address
+# (`BIND_ADDR_TAILNET` / `BIND_ADDR_LAN` in palimpsest-stack). That is the other
+# repo's file and this session does not edit it.
 #
-# The one thing these rules ARE solely responsible for: Jellyfin. It runs on
-# host networking and is not published by Docker at all, so 8096/1900/7359 are
-# protected by this file and nothing else.
+# Three practical consequences:
+#
+#   1. An admin UI that is unreachable is a BIND ADDRESS problem. Adding a port
+#      here cannot fix it and only widens the firewall.
+#   2. An admin UI reachable when it should not be is ALSO a bind address
+#      problem. No rule here can close it.
+#   3. THE ONE PATH BACK: if a service ever moves from Docker publishing to host
+#      networking, it stops being covered by its bind address and starts needing
+#      a rule here. Add it AT THAT TIME. This is the only circumstance in which
+#      this list should grow.
+#
+# Contract v3 removed 5055 and the six admin-UI ports from this file for exactly
+# this reason. They read as protection and provided none.
 # =============================================================================
 { ... }:
 
@@ -97,21 +111,25 @@
     # Scoped to the tailscale0 interface, so these are reachable from your
     # tailnet and from nowhere else — not from the LAN, not from the internet.
     #
+    # THIS LIST IS SHORT ON PURPOSE, AND IT SHRANK IN CONTRACT v3.
+    #
+    # It contains only services that bind ON THE HOST: sshd, and Jellyfin via
+    # host networking. Every admin UI (6767, 7878, 8080, 8081, 8989, 9696) and
+    # Jellyseerr (5055) used to be listed here and have been REMOVED, because
+    # they are Docker-published and an INPUT rule never sees their traffic — see
+    # the §5.2 explanation at the top of this file. Those entries read as
+    # protection and provided none.
+    #
+    # Do not "restore" them. Their exposure is governed by the stack's bind
+    # address. If you add a port here, it must be for something that binds on
+    # the host itself.
+    #
     # Note this is deliberately a PORT LIST and not
     # `trustedInterfaces = [ "tailscale0" ]`. Trusting the interface would open
-    # every port on the machine to the tailnet. The contract enumerates specific
-    # ports, so we enumerate specific ports; a device that joins the tailnet
-    # later gets access to these services and not to anything else running here.
+    # every port on the machine to the tailnet.
     interfaces."tailscale0".allowedTCPPorts = [
-      22 # SSH
-      5055 # Jellyseerr
-      6767 # Bazarr
-      7878 # Radarr
-      8080 # qBittorrent WebUI
-      8081 # SABnzbd
-      8096 # Jellyfin
-      8989 # Sonarr
-      9696 # Prowlarr
+      22 # SSH — sshd binds on the host
+      8096 # Jellyfin — host networking, not published by Docker
     ];
 
     # -------------------------------------------------------------------------
@@ -127,20 +145,26 @@
     # nixos-fw table. `ip saddr` matches IPv4 only, which is correct — RFC1918
     # is an IPv4 concept and there is deliberately no IPv6 equivalent rule here.
     #
-    # TCP 5055 (Jellyseerr) is in the LAN rule as of contract v2. It is the
-    # family-facing request UI; confining it to the tailnet, as v1 did, put it
-    # out of reach of the people it exists for.
+    # EVERY PORT IN THESE TWO RULES BINDS ON THE HOST. That is the entire
+    # criterion for being here, per contract v3 §5.2.
     #
-    # UDP 1900/7359 are Jellyfin client auto-discovery — SSDP and Jellyfin's own
-    # broadcast. They are LAN-ONLY and deliberately absent from the tailscale0
-    # port list: discovery is a broadcast mechanism that does not work across a
-    # tailnet anyway, so opening them there would be pure surface for no
-    # function. Without these, host networking lets Jellyfin *send* discovery
-    # traffic but inbound probes are dropped, so clients silently have to be
-    # pointed at an IP by hand.
+    #   22   — sshd, a host process
+    #   8096 — Jellyfin, host networking, not published by Docker
+    #   1900 } Jellyfin client auto-discovery (SSDP + Jellyfin's own broadcast),
+    #   7359 } also host networking. LAN-only: discovery is a broadcast
+    #          mechanism that does not traverse a tailnet, so putting these on
+    #          tailscale0 would be surface with no function. Without them,
+    #          Jellyfin can *send* discovery traffic but inbound probes are
+    #          dropped, and every client has to be pointed at an IP by hand.
+    #
+    # TCP 5055 (Jellyseerr) WAS in this rule under contract v2 and was REMOVED
+    # in v3. It is Docker-published, so this rule never saw its traffic — the
+    # rule passed review, passed a grep of the ruleset, and constrained nothing.
+    # Jellyseerr's LAN exposure comes from the stack binding an explicit LAN
+    # address. Do not add it back.
     extraInputRules = ''
-      ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } tcp dport { 22, 8096, 5055 } accept comment "contract v2 §5.1: SSH + Jellyfin + Jellyseerr from LAN (RFC1918) only"
-      ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } udp dport { 1900, 7359 } accept comment "contract v2 §5.1: Jellyfin client auto-discovery, LAN only"
+      ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } tcp dport { 22, 8096 } accept comment "contract v3 §5.1: SSH + Jellyfin from LAN (RFC1918) only; host-bound services only"
+      ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } udp dport { 1900, 7359 } accept comment "contract v3 §5.1: Jellyfin client auto-discovery, LAN only"
     '';
 
     # -------------------------------------------------------------------------
@@ -194,15 +218,18 @@
   # and rebuilds. It is a one-time manual step by design. See NOTES.md.
 
   # ---------------------------------------------------------------------------
-  # Resolved in contract v2 — kept as a record of why these rules exist
+  # History of this file's rules — why they are the shape they are
   # ---------------------------------------------------------------------------
-  # Two things this module flagged against contract v1 were amended rather than
-  # worked around, and are now implemented above:
+  # v1 → v2: UDP 1900/7359 added (auto-discovery could not work without them,
+  #          despite v1 citing it as the reason for host networking); UDP 41641
+  #          documented rather than silently open.
   #
-  #   - UDP 1900/7359 were missing, so the auto-discovery that v1 used to
-  #     justify host networking could not actually work. Now in the LAN rule.
-  #   - UDP 41641 was open but undocumented. Now disclosed in §5.1 and in the
-  #     table at the top of this file.
+  # v2 → v3: TCP 5055 removed from the LAN rule, and 5055 + the six admin-UI
+  #          ports removed from the tailscale0 list. All were Docker-published,
+  #          so INPUT never saw their traffic. v2 believed the host firewall
+  #          bounded them; it did not. Removing an inert rule does not change
+  #          real exposure by one packet — it removes a false belief, which over
+  #          a five-year life is the more dangerous of the two.
   #
-  # Nothing here is outstanding against the contract.
+  # Nothing here is outstanding against contract v3.
 }
