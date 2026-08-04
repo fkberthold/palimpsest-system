@@ -1,0 +1,13 @@
+# Nix build symlinks
+result
+result-*
+
+# Contract §6 — no credential ever enters this repo.
+# These patterns are a safety net, not a place to put secrets.
+.env
+*.env
+secrets/
+*.key
+*.pem
+*.age
+tailscale-authkey*
