@@ -90,6 +90,28 @@
   # ---------------------------------------------------------------------------
   services.openssh = {
     enable = true;
+
+    # ---- DO NOT REMOVE THIS LINE -------------------------------------------
+    # `services.openssh.openFirewall` DEFAULTS TO TRUE, and what it does is
+    # append port 22 to `networking.firewall.allowedTCPPorts`. That is a
+    # separate option definition, so it merges straight past the empty
+    # `allowedTCPPorts = [ ]` in modules/networking.nix rather than being
+    # overridden by it.
+    #
+    # The result, which I caught by reading the generated nftables ruleset
+    # rather than by reading the config, was a bare
+    #
+    #     tcp dport { 22 } accept
+    #
+    # sitting at the top of the input chain — SSH accepted from ANY source on
+    # ANY interface. Contract §5 says port 22 is reachable from LAN and
+    # tailscale0 only.
+    #
+    # With this false, port 22 is opened only by the two scoped rules in
+    # modules/networking.nix: the RFC1918 source rule and the tailscale0
+    # interface rule. Turning it back on silently widens the firewall.
+    openFirewall = false;
+
     settings = {
       # Keys only. See NOTES.md: you get in via the physical console on first
       # boot, set a password for frank, then install your key.

@@ -1,0 +1,265 @@
+#!/usr/bin/env bash
+# =============================================================================
+# verify-contract — check that this machine satisfies contract.md §7
+#
+# Run this on palimpsest itself, AFTER install and first boot, BEFORE the
+# container stack is set up. Everything it checks is the system layer's
+# responsibility, so it should pass with no compose.yaml present at all.
+#
+#     sudo /opt/palimpsest-system/scripts/verify-contract
+#
+# Exit status is 0 only if every REQUIRED check passes. Checks marked [info] are
+# reported but do not affect the exit status.
+#
+# The hardlink test at the end is the one that matters most. If it fails, the
+# whole automation layer is broken in a way that will not announce itself:
+# imports silently become full copies, disk usage doubles and seeding breaks.
+# =============================================================================
+set -uo pipefail
+
+pass=0
+fail=0
+skip=0
+
+ok()   { printf '  \033[32mPASS\033[0m  %s\n' "$1"; pass=$((pass + 1)); }
+no()   { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; fail=$((fail + 1)); }
+note() { printf '  \033[33minfo\033[0m  %s\n' "$1"; skip=$((skip + 1)); }
+hdr()  { printf '\n\033[1m%s\033[0m\n' "$1"; }
+
+# Compare "actual" against "expected" and report.
+expect() { # expect <label> <expected> <actual>
+  if [[ "$2" == "$3" ]]; then ok "$1 ($3)"; else no "$1 — expected '$2', got '$3'"; fi
+}
+
+printf '\033[1mpalimpsest — contract §7 verification\033[0m\n'
+printf 'host: %s   date: %s\n' "$(hostname)" "$(date -Is)"
+
+# -----------------------------------------------------------------------------
+hdr '§1  Identity — UIDs and GIDs the container stack hardcodes'
+# -----------------------------------------------------------------------------
+# The stack passes these to containers as PUID/PGID/group_add. If they drift,
+# every file the stack writes gets the wrong owner.
+
+expect "media uid"  "1500" "$(id -u  media 2>/dev/null || echo MISSING)"
+expect "media gid"  "1500" "$(id -g  media 2>/dev/null || echo MISSING)"
+expect "render gid" "303"  "$(getent group render | cut -d: -f3 2>/dev/null || echo MISSING)"
+expect "frank uid"  "1000" "$(id -u  frank 2>/dev/null || echo MISSING)"
+
+# media must not be able to log in.
+media_shell="$(getent passwd media | cut -d: -f7)"
+case "$media_shell" in
+  *nologin|*false) ok "media shell is non-interactive ($media_shell)" ;;
+  "")              no "media shell — user missing entirely" ;;
+  *)               no "media shell — expected nologin, got '$media_shell'" ;;
+esac
+
+# -----------------------------------------------------------------------------
+hdr '§2  Filesystem — ownership, modes, and the single-filesystem rule'
+# -----------------------------------------------------------------------------
+
+for d in /data /opt/palimpsest-stack; do
+  if [[ -d "$d" ]]; then
+    expect "$d owner/mode" "1500 1500 775" "$(stat -c '%u %g %a' "$d")"
+  else
+    no "$d does not exist"
+  fi
+done
+
+# The full tree from contract §2.
+for d in /data/media/movies /data/media/tv \
+         /data/torrents/movies /data/torrents/tv \
+         /data/usenet/incomplete /data/usenet/complete; do
+  if [[ -d "$d" ]]; then
+    expect "$d owner/mode" "1500 1500 775" "$(stat -c '%u %g %a' "$d")"
+  else
+    no "$d does not exist (systemd-tmpfiles should have created it)"
+  fi
+done
+
+# --- The single-filesystem rule ---------------------------------------------
+# /data and /data/media MUST be the same source device. A second mountpoint
+# inside /data breaks hardlinking silently.
+src_data="$(findmnt -no SOURCE --target /data 2>/dev/null)"
+src_media="$(findmnt -no SOURCE --target /data/media 2>/dev/null)"
+src_tor="$(findmnt -no SOURCE --target /data/torrents 2>/dev/null)"
+
+if [[ -n "$src_data" && "$src_data" == "$src_media" && "$src_data" == "$src_tor" ]]; then
+  ok "/data, /data/media and /data/torrents are one filesystem ($src_data)"
+else
+  no "/data is NOT a single filesystem — data=$src_data media=$src_media torrents=$src_tor"
+fi
+
+# Confirm /data is a real mount, not a directory on the root filesystem. This
+# catches the case where the labelled disk failed to mount and `nofail` let the
+# machine boot anyway.
+if mountpoint -q /data; then
+  ok "/data is a mountpoint (not a directory on /)"
+else
+  no "/data is NOT mounted — the palimpsest-data filesystem is missing. Check: findmnt /data; blkid | grep palimpsest-data"
+fi
+
+# --- The transcode tmpfs (the one permitted exception) -----------------------
+if mountpoint -q /data/transcode; then
+  tmpfs_type="$(findmnt -no FSTYPE /data/transcode)"
+  tmpfs_size="$(findmnt -no SIZE   /data/transcode)"
+  expect "/data/transcode fstype" "tmpfs" "$tmpfs_type"
+  ok "/data/transcode size is $tmpfs_size (expect ~8G)"
+  expect "/data/transcode owner/mode" "1500 1500 775" "$(stat -c '%u %g %a' /data/transcode)"
+else
+  no "/data/transcode is not mounted as tmpfs"
+fi
+
+# -----------------------------------------------------------------------------
+hdr '§4  Hardware transcoding — VAAPI / QuickSync'
+# -----------------------------------------------------------------------------
+
+if [[ -e /dev/dri/renderD128 ]]; then
+  ok "/dev/dri/renderD128 exists"
+  # The render node must be group-owned by render(303) or the container's
+  # group_add: 303 buys it nothing.
+  expect "renderD128 group" "303" "$(stat -c '%g' /dev/dri/renderD128)"
+else
+  no "/dev/dri/renderD128 missing — check BIOS is Hybrid/Optimus, not discrete-only"
+fi
+
+if command -v vainfo >/dev/null 2>&1; then
+  vaout="$(vainfo 2>&1)"
+  nprof="$(printf '%s' "$vaout" | grep -c VAProfile)"
+  if [[ "$nprof" -gt 0 ]]; then
+    ok "vainfo reports $nprof VAProfile entries"
+    # iHD, not the legacy i965 driver (contract §4).
+    if printf '%s' "$vaout" | grep -qi 'iHD'; then
+      ok "driver is iHD"
+    else
+      no "VAAPI is up but does not look like iHD — contract §4 requires intel-media-driver"
+    fi
+    # Encode support is the thing that actually matters for transcoding.
+    printf '%s' "$vaout" | grep -q 'VAProfileH264.*EncSlice' \
+      && ok "H264 hardware ENCODE available" \
+      || no "no H264 encode profile — transcoding will fall back to CPU"
+    printf '%s' "$vaout" | grep -q 'VAProfileHEVCMain.*EncSlice' \
+      && ok "HEVC hardware ENCODE available" \
+      || note "no HEVC encode profile (decode-only is still usable)"
+  else
+    no "vainfo returned no VAProfile lines — VAAPI is not working. Output was: $(printf '%s' "$vaout" | head -3)"
+  fi
+else
+  no "vainfo not installed (expected from libva-utils)"
+fi
+
+# -----------------------------------------------------------------------------
+hdr 'Power — dGPU asleep, machine never sleeps'
+# -----------------------------------------------------------------------------
+# Not strictly contract §7, but this is the cheapest moment to catch it.
+
+nvaddr="$(lspci -Dnn 2>/dev/null | grep -i nvidia | head -1 | cut -d' ' -f1)"
+if [[ -n "$nvaddr" ]]; then
+  pstate="$(cat "/sys/bus/pci/devices/$nvaddr/power_state" 2>/dev/null || echo unknown)"
+  if [[ "$pstate" == "D3cold" ]]; then
+    ok "dGPU at $nvaddr is in D3cold"
+  else
+    note "dGPU at $nvaddr is in $pstate, not D3cold — see NOTES.md 'The dGPU might not reach D3cold'. Costs ~10-15W, does not break anything."
+  fi
+  if lsmod | grep -q '^nouveau'; then
+    no "nouveau is loaded despite being blacklisted"
+  else
+    ok "nouveau is not loaded"
+  fi
+else
+  note "no NVIDIA device found by lspci"
+fi
+
+for t in sleep suspend hibernate hybrid-sleep suspend-then-hibernate; do
+  state="$(systemctl is-enabled "$t.target" 2>&1 || true)"
+  if [[ "$state" == "masked" ]]; then
+    ok "$t.target is masked"
+  else
+    no "$t.target is '$state', expected masked"
+  fi
+done
+
+lid="$(awk -F= '/^HandleLidSwitch=/{print $2}' /etc/systemd/logind.conf 2>/dev/null | head -1)"
+[[ "$lid" == "ignore" ]] && ok "HandleLidSwitch=ignore" || no "HandleLidSwitch is '${lid:-unset}', expected ignore"
+
+# -----------------------------------------------------------------------------
+hdr '§3 / §5  Container runtime, stack unit, firewall'
+# -----------------------------------------------------------------------------
+
+systemctl is-active --quiet docker \
+  && ok "docker is running" \
+  || no "docker is not running"
+
+# The unit must EXIST but ship DISABLED (contract §3).
+unit_state="$(systemctl is-enabled palimpsest-stack.service 2>&1 || true)"
+case "$unit_state" in
+  disabled) ok "palimpsest-stack.service exists and is disabled (as contract §3 requires initially)" ;;
+  enabled)  note "palimpsest-stack.service is ENABLED — fine once the stack works, deliberate?" ;;
+  *)        no  "palimpsest-stack.service state is '$unit_state' — expected disabled" ;;
+esac
+
+# The compose file is owned by the OTHER repo. Its absence is expected and
+# correct at this stage, so this is informational only.
+if [[ -f /opt/palimpsest-stack/compose.yaml ]]; then
+  if docker compose -f /opt/palimpsest-stack/compose.yaml config >/dev/null 2>&1; then
+    ok "compose.yaml parses"
+  else
+    no "compose.yaml exists but does not parse"
+  fi
+else
+  note "no compose.yaml yet — expected; that file belongs to the palimpsest-stack repo"
+fi
+
+if command -v nft >/dev/null 2>&1; then
+  if nft list table inet nixos-fw >/dev/null 2>&1; then
+    ok "nftables firewall table is loaded"
+    nft list table inet nixos-fw 2>/dev/null | grep -q '10.0.0.0/8' \
+      && ok "RFC1918 source rule is present" \
+      || no "RFC1918 source rule missing from the ruleset"
+  else
+    no "inet nixos-fw table is not loaded — the firewall is not up"
+  fi
+fi
+
+systemctl is-active --quiet tailscaled \
+  && ok "tailscaled is running" \
+  || no "tailscaled is not running"
+
+# -----------------------------------------------------------------------------
+hdr 'THE IMPORTANT ONE — cross-directory hardlinking'
+# -----------------------------------------------------------------------------
+# Contract §7: "If it fails, the whole automation layer is broken in a way that
+# will not announce itself."
+#
+# This writes into the real directories the *arr apps use, then cleans up.
+
+link_src=/data/torrents/.verify-hardlink.$$
+link_dst=/data/media/.verify-hardlink.$$
+cleanup() { rm -f "$link_src" "$link_dst" 2>/dev/null || true; }
+trap cleanup EXIT
+
+if touch "$link_src" 2>/dev/null; then
+  if ln "$link_src" "$link_dst" 2>/dev/null; then
+    # Same inode == a true hardlink, not a copy.
+    i1="$(stat -c '%i' "$link_src")"
+    i2="$(stat -c '%i' "$link_dst")"
+    if [[ "$i1" == "$i2" ]]; then
+      ok "HARDLINK OK — /data/torrents -> /data/media share inode $i1"
+    else
+      no "ln succeeded but inodes differ ($i1 vs $i2) — this was a COPY, not a hardlink"
+    fi
+  else
+    no "HARDLINK FAILED — /data/torrents and /data/media are not on the same filesystem. Every import will become a slow full copy and seeding will break."
+  fi
+else
+  no "could not create a test file in /data/torrents (permissions? not mounted?)"
+fi
+cleanup
+trap - EXIT
+
+# -----------------------------------------------------------------------------
+printf '\n\033[1m%d passed, %d failed, %d informational\033[0m\n' "$pass" "$fail" "$skip"
+if [[ "$fail" -gt 0 ]]; then
+  printf '\033[31mCONTRACT NOT SATISFIED\033[0m — fix the FAIL lines above before installing the stack.\n'
+  exit 1
+fi
+printf '\033[32mContract satisfied.\033[0m The system layer is ready for palimpsest-stack.\n'
