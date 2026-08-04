@@ -320,7 +320,7 @@ does not.
 
 Consequence worth knowing: on a node where `tailscale up` has never been run,
 starting the stack fails after 60 seconds *by design*. INSTALL.md authenticates
-Tailscale (§11) before ever starting the stack (§14).
+Tailscale (§10) before ever starting the stack (§14).
 
 ### 4.6 Read v2 §5.2 before debugging an unreachable admin UI
 
@@ -393,9 +393,9 @@ would have produced an unbounded restart loop instead of a bounded one.
 No secrets are in this repo (contract §6). These are the steps that need a
 human.
 
-1. **BIOS first**, per `x17r2-jellyfin-build.md` §1 — that part is still
-   correct. Especially: graphics mode **Hybrid/Optimus** (discrete-only kills
-   QuickSync), AC power recovery **on**, Secure Boot **off**.
+1. **BIOS first**, per INSTALL.md §1. Especially: graphics mode
+   **Hybrid/Optimus** (discrete-only kills QuickSync), AC power recovery **on**,
+   Secure Boot **off**.
 2. **Root password** — `nixos-install` prompts for one at the end. That is the
    only credential created during install.
 3. **First console login.** SSH has `PasswordAuthentication = false` and `frank`
@@ -404,18 +404,29 @@ human.
    ```bash
    passwd frank
    ```
-4. **Install your SSH key**, from your workstation:
-   ```bash
-   ssh-copy-id frank@<lan-ip>      # will prompt for the password you just set
-   ```
-   Then confirm key auth works before you walk away from the machine.
-   Optionally afterwards, add the key to `users.users.frank` in
-   `modules/users.nix` (a public key is not a secret) so it is declarative.
-5. **Tailscale** — authenticate once by hand. No auth key is in the config:
+   This password is for the **console and sudo only**. It does not work over
+   SSH — see the next item.
+4. **Tailscale, BEFORE the SSH key.** This ordering is not optional and the
+   obvious order does not work.
    ```bash
    sudo tailscale up --ssh
    ```
-   The node key persists in `/var/lib/tailscale` across reboots and rebuilds.
+   `--ssh` makes tailscaled terminate SSH itself on the tailnet address, never
+   consulting OpenSSH, so it is the only way in that needs no pre-existing
+   credential. The node key persists in `/var/lib/tailscale` across reboots and
+   rebuilds.
+5. **Install your SSH key** — for LAN reachability; Tailscale already works.
+   **`ssh-copy-id` CANNOT be used here.** It authenticates over SSH to append
+   the key, but sshd offers `publickey` only (`PasswordAuthentication` and
+   `KbdInteractiveAuthentication` are both false), so it fails with
+   `Permission denied (publickey)`. The key must arrive by another path: paste
+   it over the Tailscale shell, `curl` it from GitHub, or — best — declare it
+   in `users.users.frank.openssh.authorizedKeys.keys` in `modules/users.nix`.
+   A public key is not a secret, so the declarative form does not violate
+   contract §6, and doing it *before* install skips this dance entirely.
+   Full detail in INSTALL.md §11.
+   Note there is **no text editor** on the machine (`environment.defaultPackages`
+   is perl/rsync/strace); use `cat >>` or add one.
 6. **Router** — set a DHCP reservation for the wired interface. Do **not**
    port-forward anything.
 7. **Run the verifier**:

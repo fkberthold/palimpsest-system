@@ -151,6 +151,19 @@ Check three things:
 > git add -A
 > ```
 
+> **Worth doing now: add your SSH public key.** This is the cheapest moment.
+> Adding it here means key auth works on first boot and §11 becomes a no-op —
+> otherwise you have to get the key onto a machine you cannot yet SSH into. In
+> `modules/users.nix`, under `users.users.frank`:
+>
+> ```nix
+> openssh.authorizedKeys.keys = [
+>   "ssh-ed25519 AAAA... frank@workstation"
+> ];
+> ```
+>
+> A public key is not a secret, so this does not violate contract §6.
+
 ---
 
 ## 7. Build before you install
@@ -188,9 +201,9 @@ Remove the USB stick.
 
 ## 9. First boot — at the laptop's own keyboard
 
-You need physical access for exactly this one step. SSH has password auth
-disabled and `frank` has neither a password nor a key yet — by design, so that
-no credential lives in git.
+You need physical access for this step. SSH has password auth disabled and
+`frank` has neither a password nor a key yet — by design, so that no credential
+lives in git.
 
 Log in as `root` with the password from §8:
 
@@ -199,39 +212,106 @@ passwd frank                       # set frank's password
 ip a                               # note the LAN address
 ```
 
----
-
-## 10. Get in over the network, then stop needing the console
-
-From your workstation:
-
-```bash
-ssh-copy-id frank@<lan-ip>         # prompts for the password from §9
-ssh frank@<lan-ip>                 # must now work WITHOUT a password prompt
-```
-
-Confirm key auth works **before** you put the laptop back on its shelf.
-
-Optionally, make it declarative: add your public key to
-`users.users.frank.openssh.authorizedKeys.keys` in `modules/users.nix` (a public
-key is not a secret, so this does not violate contract §6) and rebuild.
+> **Be clear about what this password is for.** It gets you a *console* login as
+> `frank` and lets you run `sudo`. It will **not** get you in over SSH — sshd
+> offers `publickey` only, so `ssh` and `ssh-copy-id` both fail with
+> `Permission denied (publickey)` until a key is installed. That is what §10 and
+> §11 are for, in that order.
 
 ---
 
-## 11. Tailscale
+## 10. Tailscale FIRST — this is how you get in without a key
+
+**Order matters here, and it is not the obvious order.** Do Tailscale before the
+SSH key, because Tailscale is the only way into this machine that needs no
+pre-existing credential.
+
+At the laptop's console:
 
 ```bash
 sudo tailscale up --ssh
 ```
 
-Follow the printed URL to authenticate. No auth key is in the config (contract
-§6); this is a deliberate one-time manual step. The node key then persists in
-`/var/lib/tailscale` across reboots and rebuilds.
+Follow the printed URL in any browser to authenticate. No auth key is in the
+config (contract §6); this is a deliberate one-time manual step. The node key
+then persists in `/var/lib/tailscale` across reboots and rebuilds.
 
-Confirm from another tailnet device:
+Now, from your workstation:
 
 ```bash
 ssh frank@palimpsest
+```
+
+This works with **no key and no password**. `--ssh` makes tailscaled itself
+terminate the SSH connection on the tailnet address — OpenSSH is never
+consulted, so this layer's `PasswordAuthentication no` does not apply. The
+firewall already permits it (`iifname tailscale0 tcp dport { 22, 8096 }`).
+
+If it is refused, check your tailnet's SSH ACLs in the Tailscale admin console;
+the default policy allows you to reach your own devices.
+
+You now have a shell you can paste into, which makes §11 painless.
+
+---
+
+## 11. Install your SSH key, for LAN access
+
+> **Why this cannot be done with `ssh-copy-id` from a bare install.**
+> `ssh-copy-id` works by logging in over SSH and appending your key — but
+> `modules/base.nix` sets both `PasswordAuthentication = false` and
+> `KbdInteractiveAuthentication = false`, so the only method sshd offers is
+> `publickey`. The password you set in §9 is unusable over SSH. With no key yet
+> installed there is no way in, and `ssh-copy-id` fails with
+> **`Permission denied (publickey)`**. That is sshd behaving correctly.
+>
+> So the key has to arrive by some path other than SSH. Any of the three below.
+
+Tailscale (§10) is reachable regardless, so this step is only about making the
+machine reachable **over the LAN** — which matters when the tailnet is down, or
+from a device that is not on it.
+
+**A — over the Tailscale shell from §10** (easiest; you can paste):
+
+```bash
+mkdir -p ~/.ssh && chmod 700 ~/.ssh
+cat >> ~/.ssh/authorized_keys      # paste your PUBLIC key, then Ctrl-D
+chmod 600 ~/.ssh/authorized_keys
+```
+
+**B — from GitHub, if your key is published there** (least typing at a physical
+console; `curl` is installed, an editor is not):
+
+```bash
+mkdir -p ~/.ssh && chmod 700 ~/.ssh
+curl -fsSL https://github.com/<your-github-username>.keys >> ~/.ssh/authorized_keys
+chmod 600 ~/.ssh/authorized_keys
+```
+
+**C — declaratively, the tidiest long-term.** A public key is not a secret, so
+this does not violate contract §6. Add to `users.users.frank` in
+`modules/users.nix`:
+
+```nix
+openssh.authorizedKeys.keys = [
+  "ssh-ed25519 AAAA... frank@workstation"
+];
+```
+
+then `sudo nixos-rebuild switch --flake /opt/palimpsest-system#palimpsest`.
+Survives a reinstall, and is the one option that leaves no machine state to
+recreate. **If you do this before ever installing** — back at §6, on your
+workstation — steps 9 through 11 collapse into nothing and key auth works on
+first boot.
+
+> **There is no text editor on this machine.** `environment.defaultPackages` is
+> `perl`, `rsync`, `strace` — no `nano`, no `vim`. Use `cat >>` as shown, or add
+> an editor to `environment.systemPackages` if you want one.
+
+Verify from your workstation, and do this **before** putting the laptop back on
+its shelf:
+
+```bash
+ssh frank@<lan-ip>                 # must succeed with NO password prompt
 ```
 
 ---
@@ -279,7 +359,7 @@ cat /sys/bus/pci/devices/0000:01:00.0/power_state    # want D3cold
 The system layer is done. `palimpsest-stack` gets cloned to
 `/opt/palimpsest-stack` and owns `compose.yaml` from here.
 
-> **§11 is a prerequisite for this step, not a suggestion.** The stack unit has
+> **§10 (Tailscale) is a prerequisite for this step, not a suggestion.** The stack unit has
 > an `ExecStartPre` that waits up to 60 seconds for `tailscale0` to have an IPv4
 > address and then **fails**. On a node where `tailscale up` has never been run
 > there is no address to wait for, so starting the stack will fail by design

@@ -49,7 +49,7 @@ let
   # NOTE ON FIRST BOOT: on a node that has never run `tailscale up`, there is no
   # address to wait for and this will correctly fail after 60s. That is the
   # intended behaviour, not a bug — see INSTALL.md, which authenticates
-  # Tailscale (§11) before ever starting the stack (§14).
+  # Tailscale (§10) before ever starting the stack (§14).
   #
   # `ip` is referenced by absolute store path. `seq`/`sleep`/`grep` come from
   # the default PATH NixOS gives every systemd service (coreutils + gnugrep),
