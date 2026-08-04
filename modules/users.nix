@@ -45,20 +45,24 @@
       "media" # read/write the library without sudo
     ];
 
-    # NO PASSWORD AND NO KEY ARE SET HERE, deliberately.
+    # ---- SSH key, declared here on purpose --------------------------------
+    # A PUBLIC key is not a secret. Contract §6 forbids secrets in the repo and
+    # forbids baking passwords or private keys into the world-readable Nix
+    # store; a public key is neither. Putting it here is the whole point of a
+    # declarative OS: key auth works on first boot, with no console dance and
+    # nothing to recreate after a reinstall.
     #
-    # Contract §6 says no credential enters this repo, and that includes a
-    # placeholder password baked into the Nix store where every user on the
-    # machine can read it.
-    #
-    # Instead: nixos-install prompts for a root password at the end of the
-    # install. On first boot you log in as root on the laptop's own keyboard and
-    # run `passwd frank`. Then add your key. See NOTES.md.
-    #
-    # Until you do that, this account has no password and cannot be logged into
-    # — which is correct, not a bug.
-    #
-    # openssh.authorizedKeys.keys = [ "ssh-ed25519 AAAA... frank@workstation" ];
+    # (An earlier revision of this file left this commented out and pushed the
+    # work into a manual `ssh-copy-id` step. That could never have worked —
+    # sshd offers publickey only, so there was no way in to copy a key with.)
+    openssh.authorizedKeys.keys = [
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINNWBbGHD+rSVTsJpL9vZYqKYqbIbbtYpSP99IL9ih9j fkberthold@gmail.com"
+    ];
+
+    # No password is set here, and that stays true: a password IS a credential,
+    # and the Nix store is world-readable. `nixos-install` prompts for a root
+    # password at the end of the install; set frank's from that console session
+    # with `passwd frank` if you want sudo. SSH does not need it.
   };
 
   # `mutableUsers = true` is the NixOS default and we keep it, precisely so that

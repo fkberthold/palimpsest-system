@@ -22,7 +22,7 @@
     ../../modules/power.nix # never sleep; keep the dGPU asleep
     ../../modules/storage.nix # contract §2 — /data and the directory tree
     ../../modules/containers.nix # contract §3 — Docker + the stack unit
-    ../../modules/networking.nix # contract §5 — firewall, tailscale
+    ../../modules/networking.nix # contract §5 — firewall, LAN exposure
     ../../modules/vm.nix # test-VM overrides only; no effect on the real machine
   ];
 

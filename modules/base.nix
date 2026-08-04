@@ -112,17 +112,18 @@
     #     tcp dport { 22 } accept
     #
     # sitting at the top of the input chain — SSH accepted from ANY source on
-    # ANY interface. Contract §5 says port 22 is reachable from LAN and
-    # tailscale0 only.
+    # ANY interface. Port 22 is meant to be reachable from the LAN only.
     #
-    # With this false, port 22 is opened only by the two scoped rules in
-    # modules/networking.nix: the RFC1918 source rule and the tailscale0
-    # interface rule. Turning it back on silently widens the firewall.
+    # With this false, port 22 is opened only by the RFC1918 source rule in
+    # modules/networking.nix. Turning it back on silently widens the firewall —
+    # and given the plan to forward a port at the router, that would mean sshd
+    # answering the open internet.
     openFirewall = false;
 
     settings = {
-      # Keys only. See NOTES.md: you get in via the physical console on first
-      # boot, set a password for frank, then install your key.
+      # Keys only. frank's public key is declared in modules/users.nix, so key
+      # auth works from first boot with no console step. A public key is not a
+      # secret; a password would be, and none is set anywhere.
       PasswordAuthentication = false;
       KbdInteractiveAuthentication = false;
       PermitRootLogin = "no";
@@ -158,6 +159,11 @@
     # installer from claude.ai cannot work here; this is the packaged build.
     claude-code
 
+    # An editor. NixOS's environment.defaultPackages is only perl/rsync/strace,
+    # so without this there is NO editor on the machine at all — which is a
+    # miserable discovery to make at the console at 2am.
+    vim
+
     # Small quality-of-life additions for a headless box you will be debugging
     # over SSH. Remove any you don't want.
     jq
@@ -165,4 +171,8 @@
     file
     dnsutils # dig, for when "is it DNS" needs answering
   ];
+
+  # Make vim the default for anything that consults $EDITOR (git commit,
+  # systemctl edit, visudo).
+  environment.variables.EDITOR = "vim";
 }

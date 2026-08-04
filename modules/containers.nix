@@ -27,39 +27,43 @@ let
   stackDir = "/opt/palimpsest-stack";
   composeFile = "${stackDir}/compose.yaml";
 
-  # Contract v2 §3 — the stack unit's start precondition.
+  # The stack unit's start precondition.
   #
-  # WHY THIS EXISTS AT ALL: the stack publishes its admin UIs bound to this
-  # machine's *tailnet* address (contract §5.2, `BIND_ADDR_TAILNET`), and Docker
-  # cannot bind an address that does not exist yet. `After=tailscaled.service`
-  # is necessary but NOT sufficient — the daemon reaching "active" only means
-  # the process started, not that the interface has been assigned an IPv4
-  # address. Between those two moments, `docker compose up -d` fails with a
-  # bind error that reads like a Docker problem and is not one.
+  # WHY A PRECONDITION EXISTS AT ALL: the stack binds its services to an
+  # EXPLICIT address (contract §5.2 — `BIND_ADDR_LAN`, this machine's
+  # DHCP-reserved LAN address), and Docker cannot bind an address that does not
+  # exist yet. At boot there is a window where the interface is up but DHCP has
+  # not yet returned a lease. Starting `docker compose up -d` inside that window
+  # fails with a bind error that reads like a Docker problem and is not one.
   #
-  # WHY IT FAILS RATHER THAN GIVING UP QUIETLY: contract §3 is explicit that a
-  # timeout must fail. A poll that gives up and returns success produces a
-  # half-started stack — some containers bound, some not — which presents the
-  # next morning as an assortment of unrelated-looking symptoms. Exiting
-  # non-zero produces one clear line in the journal instead.
+  # WHAT CHANGED: this used to poll for an IPv4 on `tailscale0`. Tailscale has
+  # been removed — a Roku has no VPN client, so a tailnet could never have
+  # served the actual requirement — but the underlying race did not go away
+  # with it. It just moved from the tailnet address to the LAN address. So the
+  # poll is generalised rather than deleted: wait for a global-scope IPv4 on any
+  # real interface.
   #
-  # 60s is ample; tailscaled normally has an address within a second or two of
-  # starting on an already-authenticated node.
+  # `scope global` is doing real work in that match. It excludes 127.0.0.1 and
+  # link-local 169.254.0.0/16 — the latter being exactly what you get when DHCP
+  # has FAILED, which is a state we want to keep waiting through rather than
+  # treat as success.
   #
-  # NOTE ON FIRST BOOT: on a node that has never run `tailscale up`, there is no
-  # address to wait for and this will correctly fail after 60s. That is the
-  # intended behaviour, not a bug — see INSTALL.md, which authenticates
-  # Tailscale (§11) before ever starting the stack (§14).
+  # WHY IT FAILS RATHER THAN GIVING UP QUIETLY: a poll that times out and
+  # returns success produces a half-started stack — some containers bound, some
+  # not — which presents the next morning as an assortment of unrelated-looking
+  # symptoms. Exiting non-zero produces one clear line in the journal instead.
+  #
+  # 60s is ample for DHCP on a wired link.
   #
   # `ip` is referenced by absolute store path. `seq`/`sleep`/`grep` come from
   # the default PATH NixOS gives every systemd service (coreutils + gnugrep),
-  # which is verified present in the generated unit.
-  waitForTailscale = pkgs.writeShellScript "wait-for-tailscale0" ''
+  # verified present in the generated unit.
+  waitForNetwork = pkgs.writeShellScript "wait-for-lan-address" ''
     for i in $(seq 1 60); do
-      ${pkgs.iproute2}/bin/ip -4 addr show tailscale0 2>/dev/null | grep -q 'inet ' && exit 0
+      ${pkgs.iproute2}/bin/ip -4 -o addr show scope global 2>/dev/null | grep -q 'inet ' && exit 0
       sleep 1
     done
-    echo "tailscale0 has no IPv4 address after 60s; stack ports will fail to bind" >&2
+    echo "no global IPv4 address after 60s; stack ports will fail to bind" >&2
     exit 1
   '';
 
@@ -128,21 +132,18 @@ in
     description = "palimpsest container stack (docker compose)";
     documentation = [ "file://${composeFile}" ];
 
-    # Contract v2 §3: After=docker.service tailscaled.service.
+    # Ordering only, not a dependency: if docker is somehow not running, this
+    # unit starts and fails loudly rather than pulling it in. Failing visibly is
+    # the intended behaviour.
     #
-    # Note this is ORDERING ONLY, per the contract, not a dependency: if either
-    # is somehow not running, this unit will start and fail loudly rather than
-    # pulling them in. Failing visibly is the intended behaviour. (Adding
-    # `requires = [ "docker.service" ]` would be defensible, but the contract
-    # specifies ordering and I do not get to quietly upgrade it. See NOTES.md.)
-    #
-    # tailscaled is ordered here as the *first half* of the tailnet
-    # precondition; the ExecStartPre poll below is the second half, because
-    # ordering alone does not guarantee the interface has an address.
+    # network-online.target is the *first half* of the address precondition;
+    # the ExecStartPre poll is the second half, because on NixOS that target is
+    # weaker than it sounds and does not by itself guarantee a DHCP lease.
     after = [
       "docker.service"
-      "tailscaled.service"
+      "network-online.target"
     ];
+    wants = [ "network-online.target" ];
 
     # Contract v2 §3, and this is what makes the `nofail` on /data safe.
     #
@@ -193,10 +194,10 @@ in
 
       WorkingDirectory = stackDir;
 
-      # Contract v2 §3 — bounded wait for tailscale0 to have an IPv4 address.
-      # Defined and explained in the `let` block at the top of this file.
-      # A non-zero exit here aborts the unit before ExecStart runs at all.
-      ExecStartPre = waitForTailscale;
+      # Bounded wait for a usable LAN address. Defined and explained in the
+      # `let` block at the top of this file. A non-zero exit here aborts the
+      # unit before ExecStart runs at all.
+      ExecStartPre = waitForNetwork;
 
       # Contract §3: `docker compose up -d` on start, `down` on stop.
       ExecStart = "${docker} compose -f ${composeFile} up -d";
@@ -231,9 +232,9 @@ in
       # hazard is real and this does not reintroduce it.
       #
       # This governs a completely different event: a unit that NEVER STARTED.
-      # If the ExecStartPre tailscale0 poll times out at boot — a slow tailnet,
-      # a DERP round-trip, tailscaled taking longer than usual to get an
-      # address — the unit fails before `docker compose` runs at all. There are
+      # If the ExecStartPre address poll times out at boot — a slow DHCP lease,
+      # a switch still negotiating, the router not yet up after a power cut —
+      # the unit fails before `docker compose` runs at all. There are
       # no containers running for Docker's own restart policy to recover,
       # because none were ever created. Without this, the stack simply stays
       # down until a human notices, which on a headless box could be days.

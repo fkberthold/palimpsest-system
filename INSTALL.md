@@ -151,6 +151,11 @@ Check three things:
 > git add -A
 > ```
 
+> **Your SSH key is already declared** in `modules/users.nix`, so key auth works
+> on first boot with nothing to copy. If you are installing from a machine whose
+> key is not the one in there, add it now — this is the cheapest moment, and the
+> alternative is getting a key onto a box you cannot yet SSH into.
+
 ---
 
 ## 7. Build before you install
@@ -186,131 +191,105 @@ Remove the USB stick.
 
 ---
 
-## 9. First boot — at the laptop's own keyboard
+## 9. First boot
 
-You need physical access for exactly this one step. SSH has password auth
-disabled and `frank` has neither a password nor a key yet — by design, so that
-no credential lives in git.
+It should come up and be reachable over SSH straight away — your key is in
+`modules/users.nix`, so there is no console dance and nothing to copy.
 
-Log in as `root` with the password from §8:
+From here:
 
 ```bash
-passwd frank                       # set frank's password
-ip a                               # note the LAN address
+ssh frank@<lan-ip>
 ```
+
+The root password from §8 is for the physical console and for `sudo`. If you
+want `sudo` as frank, log in at the laptop once and run `passwd frank`.
+Otherwise you never need it.
 
 ---
 
-## 10. Get in over the network, then stop needing the console
+## 10. Router
 
-From your workstation:
+Set a **DHCP reservation** for the wired interface's MAC. The stack binds
+services to that address explicitly, so it needs to be stable.
 
-```bash
-ssh-copy-id frank@<lan-ip>         # prompts for the password from §9
-ssh frank@<lan-ip>                 # must now work WITHOUT a password prompt
-```
-
-Confirm key auth works **before** you put the laptop back on its shelf.
-
-Optionally, make it declarative: add your public key to
-`users.users.frank.openssh.authorizedKeys.keys` in `modules/users.nix` (a public
-key is not a secret, so this does not violate contract §6) and rebuild.
+Do not forward any ports yet — see §13.
 
 ---
 
-## 11. Tailscale
-
-```bash
-sudo tailscale up --ssh
-```
-
-Follow the printed URL to authenticate. No auth key is in the config (contract
-§6); this is a deliberate one-time manual step. The node key then persists in
-`/var/lib/tailscale` across reboots and rebuilds.
-
-Confirm from another tailnet device:
-
-```bash
-ssh frank@palimpsest
-```
-
----
-
-## 12. Router
-
-Set a **DHCP reservation** for the wired interface's MAC.
-
-**Do not port-forward anything.** Not 8096, not 22, not ever. Contract §5.
-
----
-
-## 13. Verify the contract
+## 11. Verify
 
 ```bash
 sudo /opt/palimpsest-system/scripts/verify-contract
 ```
 
-Everything must pass — this implements contract v2 §7.1. It is the gate before the other half of the system gets
-installed — it confirms UIDs, ownership, the firewall, the stack unit's state,
-and most importantly that hardlinking works between `/data/torrents` and
-`/data/media`.
+Everything must pass. This is the gate before the stack goes on: UIDs,
+ownership, the firewall, the stack unit, and — the one that matters most —
+that hardlinking works between `/data/torrents` and `/data/media`.
 
-Then confirm hardware transcoding specifically, since it is the one thing the
-test VM could not check:
+Then the two things no VM could check:
 
 ```bash
-vainfo | grep -E 'VAProfile(H264|HEVC|VP9|AV1)'
-```
-
-Expect H264 and HEVC encode **and** decode, HEVC Main10, VP9 decode, AV1 decode.
-
-And check whether the dGPU actually powered down (NOTES.md §3.1 — this one may
-not pass, and it is not a blocker):
-
-```bash
+vainfo | grep -E 'VAProfile(H264|HEVC|VP9|AV1)'    # expect H264+HEVC enc & dec
 lspci -Dnn | grep -i nvidia
-cat /sys/bus/pci/devices/0000:01:00.0/power_state    # want D3cold
+cat /sys/bus/pci/devices/0000:01:00.0/power_state   # want D3cold; see NOTES §3.1
 ```
 
 ---
 
-## 14. Hand over to the stack
+## 12. Hand over to the stack
 
-The system layer is done. `palimpsest-stack` gets cloned to
-`/opt/palimpsest-stack` and owns `compose.yaml` from here.
+Clone `palimpsest-stack` to `/opt/palimpsest-stack`; it owns `compose.yaml`
+from here.
 
-> **§11 is a prerequisite for this step, not a suggestion.** The stack unit has
-> an `ExecStartPre` that waits up to 60 seconds for `tailscale0` to have an IPv4
-> address and then **fails**. On a node where `tailscale up` has never been run
-> there is no address to wait for, so starting the stack will fail by design
-> with `tailscale0 has no IPv4 address after 60s` in the journal. That is
-> contract v2 §3 working correctly — the stack binds its admin UIs to the
-> tailnet address, and Docker cannot bind an address that does not exist.
-
-The stack unit is installed but **will not start at boot yet** — that is
-contract §3's "ships disabled". Bring it up by hand while debugging:
+The stack unit is installed but will not start at boot yet. Bring it up by hand
+while you are still fiddling:
 
 ```bash
 sudo systemctl start palimpsest-stack
 journalctl -u palimpsest-stack -f
 ```
 
-Once the stack genuinely works, make it permanent: set `enableAtBoot = true` in
-`modules/containers.nix` and rebuild.
+When it genuinely works, set `enableAtBoot = true` in `modules/containers.nix`
+and rebuild. That flag also switches on the restart policy. `systemctl enable`
+does **not** persist on NixOS — the flag is the real switch.
 
 ```bash
 sudo nixos-rebuild switch --flake /opt/palimpsest-system#palimpsest
 ```
 
-> `systemctl enable palimpsest-stack` does **not** persist on NixOS — the next
-> rebuild reverts it. The flag in the file is the real switch.
+---
+
+## 13. Later: the port-forward for your father's Roku
+
+Not yet configured, and it needs two changes — one here, one at the router.
+Read this before opening anything.
+
+**Do not forward 8096.** It is plaintext HTTP; forwarding it puts his password
+and every session token on the open internet in the clear. Jellyfin also has no
+rate limiting and no MFA, so it should not be the thing answering the internet
+directly.
+
+The shape that works:
+
+1. Terminate TLS on this machine with nginx + a Let's Encrypt certificate. On
+   NixOS that is `services.nginx` + `security.acme`, declarative, and a
+   contained addition to this repo. Needs a domain name (dynamic DNS is fine).
+2. Forward **443 only** at the router. Never 22. Never 8096.
+3. Add a matching rule in `modules/networking.nix` — the LAN rules there are
+   RFC1918-scoped, so **a forwarded packet from the internet is dropped until
+   you deliberately allow it**. That is intentional: switching on a forward at
+   the router alone cannot expose this box.
+
+The Roku Jellyfin client speaks HTTPS, so it only ever sees the proxy.
+
+Ask me when you want this built.
 
 ---
 
 ## Rollback, any time
 
-Every rebuild leaves the previous generation in the boot menu. If a change
-breaks the machine, pick the previous entry at boot, or:
+Every rebuild leaves the previous generation in the boot menu. Pick it there, or:
 
 ```bash
 sudo nixos-rebuild switch --rollback
