@@ -172,7 +172,7 @@ if [[ -n "$nvaddr" ]]; then
   if [[ "$pstate" == "D3cold" ]]; then
     ok "dGPU at $nvaddr is in D3cold"
   else
-    note "dGPU at $nvaddr is in $pstate, not D3cold — see NOTES.md 'The dGPU might not reach D3cold'. Costs ~10-15W, does not break anything."
+    no "dGPU at $nvaddr is in $pstate, not D3cold — the udev runtime-PM rule in modules/power.nix should have fixed this. Check: cat /sys/bus/pci/devices/$nvaddr/power/control (want 'auto'). Costs ~10-15W; does not break correctness."
   fi
   if lsmod | grep -q '^nouveau'; then
     no "nouveau is loaded despite being blacklisted"

@@ -152,38 +152,42 @@ to the wrong filesystem. That is the correct failure mode here.
 
 Ranked by how likely it is to actually bite you.
 
-### 3.1 The dGPU might not reach D3cold — GENUINELY UNVERIFIED
+### 3.1 The dGPU reaching D3cold — SOLVED, and the fix was not the obvious one
 
-`modules/power.nix` blacklists `nouveau` and installs no NVIDIA driver, so
-nothing binds to the card. **That guarantees no driver is loaded. It does not
-guarantee D3cold.**
+Resolved on the real machine on 2026-08-04. Recorded because the diagnosis is
+the useful part.
 
-An unbound PCIe device only drops to D3cold if the parent root port's runtime
-power management and the ACPI `_PR3` power resources cooperate, and on
-Dell/Alienware firmware that has historically varied by model and BIOS version.
-I could not verify this without the hardware, and prompt 1 asked me to say so
-rather than guess.
+Blacklisting `nouveau` was necessary but **not sufficient**, exactly as feared.
+First measurement after install:
 
-Measure it:
-
-```bash
-lspci -Dnn | grep -i nvidia                          # get the address
-cat /sys/bus/pci/devices/0000:01:00.0/power_state    # want D3cold
+```
+/sys/bus/pci/devices/0000:01:00.0/power/control  ->  on
+/sys/bus/pci/devices/0000:01:00.0/power_state    ->  D0
 ```
 
-If it says `D0`, escalating options, cheapest first:
+No driver was bound — the blacklist worked — but the card sat in D0 anyway.
+**An unbound PCI device does not runtime-suspend by itself.** Runtime PM is
+normally enabled by the driver, so with no driver there is nothing to enable it,
+`power/control` stays at `on`, and the card idles at full power indefinitely.
 
-1. Confirm BIOS graphics mode is **Hybrid/Optimus**, not discrete-only. In
-   discrete-only the iGPU is off and QuickSync is gone entirely — you would
-   have noticed, but check anyway.
-2. Check the root port allows runtime PM:
-   `cat /sys/bus/pci/devices/0000:00:01.0/power/control` (should be `auto`).
-3. Only then consider `boot.kernelParams`. **Do not start here** — guessing PCIe
-   power parameters on a laptop is a good way to produce a machine that does not
-   resume from anything, and this one is not supposed to sleep anyway.
+It was not the firmware, and it was not the audio function. `d3cold_allowed` was
+already `1`, and `01:00.1` was already `auto` (snd_hda_intel enables runtime PM
+itself). One attribute on the VGA function was the whole problem:
 
-Worst case it costs 10–15 W continuously and breaks nothing. Do not let it block
-the install.
+```bash
+echo auto > /sys/bus/pci/devices/0000:01:00.0/power/control
+```
+
+Both functions dropped to `D3cold` within seconds. That is 10-15 W recovered.
+
+Now permanent as a udev rule in `modules/power.nix` matching vendor `0x10de`,
+which covers both functions. `scripts/verify-contract` treats a non-D3cold
+reading as a FAIL rather than an informational line, since it is now a
+regression rather than an open question.
+
+**The generalisable bit:** "no driver is bound" and "the device is powered down"
+are different claims. The first does not imply the second, and on a laptop the
+gap between them is 10-15 W.
 
 ### 3.2 GuC/HuC firmware for low-power encode — probably fine, unconfirmed
 

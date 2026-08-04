@@ -161,9 +161,11 @@ is contract §7.2's listener scan, run after stack bring-up:
 
 ## Known-fragile areas
 
-1. **dGPU D3cold is unverified.** `nouveau` is blacklisted, which guarantees no
-   driver binds — it does *not* guarantee D3cold. See NOTES.md §3.1. Costs
-   10–15 W if it fails; breaks nothing.
+1. **dGPU D3cold is solved — do not remove the udev rule.** Blacklisting
+   `nouveau` alone left the card in D0 at full power: an unbound PCI device has
+   no driver to enable runtime PM, so `power/control` stays `on`. The udev rule
+   in `modules/power.nix` setting it to `auto` is what actually gets D3cold.
+   Verified on hardware. NOTES.md §3.1.
 2. **GuC/HuC firmware** for Jellyfin's low-power encoder is probably enabled by
    default on this kernel but was not confirmed. NOTES.md §3.2.
 3. **Option names churn between releases.** `hardware.opengl.*` is gone;
