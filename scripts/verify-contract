@@ -172,7 +172,7 @@ if [[ -n "$nvaddr" ]]; then
   if [[ "$pstate" == "D3cold" ]]; then
     ok "dGPU at $nvaddr is in D3cold"
   else
-    note "dGPU at $nvaddr is in $pstate, not D3cold — see NOTES.md 'The dGPU might not reach D3cold'. Costs ~10-15W, does not break anything."
+    no "dGPU at $nvaddr is in $pstate, not D3cold — the udev runtime-PM rule in modules/power.nix should have fixed this. Check: cat /sys/bus/pci/devices/$nvaddr/power/control (want 'auto'). Costs ~10-15W; does not break correctness."
   fi
   if lsmod | grep -q '^nouveau'; then
     no "nouveau is loaded despite being blacklisted"
@@ -224,16 +224,29 @@ esac
 # The compose file is owned by the OTHER repo. Its absence is expected and
 # correct at this stage, so this is informational only.
 if [[ -f /opt/palimpsest-stack/compose.yaml ]]; then
+  # NOT a system-layer check, and NOT a hard failure here.
+  #
+  # `docker compose config` is contract §7.2 — the STACK layer's verification,
+  # run after bring-up. compose.yaml belongs to the palimpsest-stack repo
+  # (contract §0), so a parse failure is that session's to fix and nothing in
+  # this repo can address it. Reporting it as a system-layer FAIL made this
+  # script print "CONTRACT NOT SATISFIED" for something the system layer
+  # neither owns nor can repair — which is exactly the mis-attribution the
+  # repo boundary exists to prevent.
+  #
+  # Still worth surfacing, so it is reported as information.
   if docker compose -f /opt/palimpsest-stack/compose.yaml config >/dev/null 2>&1; then
-    ok "compose.yaml parses"
+    ok "compose.yaml parses (bonus — this is §7.2's check, not §7.1's)"
   else
-    no "compose.yaml exists but does not parse"
+    note "compose.yaml does not parse — that is §7.2 / the stack repo's business, not this layer's."
+    note "  Most likely an unset variable rather than bad YAML: BIND_ADDR_LAN has no default by design (§5.2), and .env is gitignored so it does not exist yet."
+    note "  See the real error with:  docker compose -f /opt/palimpsest-stack/compose.yaml config"
   fi
 else
   note "no compose.yaml yet — expected; that file belongs to the palimpsest-stack repo"
 fi
 
-# --- The stack unit's contract v2 §3 properties -----------------------------
+# --- The stack unit's §3 properties -----------------------------
 # Read from the LIVE unit rather than the config, so this catches a machine
 # running an older generation than the repo it was built from.
 unit_after="$(systemctl show -p After --value palimpsest-stack.service 2>/dev/null || true)"
@@ -327,7 +340,7 @@ fi
 # before the stack exists says anything about Docker-published exposure.
 note "§5.2: Docker-published ports (5055, 6767, 7878, 8080, 8081, 8989, 9696) bypass this firewall entirely — DNAT in PREROUTING never reaches INPUT. They are NOT verified by this script and no rule here governs them."
 note "  To verify those, after stack bring-up run the contract §7.2 listener check:  ss -ltnp | awk '\$4 !~ /^\\[/ {print \$4}' | sort -u"
-note "  No Docker-published port may show 0.0.0.0: or *: — 5055 must appear twice (LAN addr + tailnet addr), the six admin UIs on the tailnet addr only."
+note "  No Docker-published port may show 0.0.0.0: or *: — every one should be bound to this machine's LAN address only."
 
 # 22 and 8096 must NOT be reachable from a public source address. The RFC1918
 # match is what enforces that, so assert the rules are source-scoped rather than

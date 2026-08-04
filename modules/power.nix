@@ -79,23 +79,41 @@
     "nvidia_modeset"
   ];
 
-  # VERIFY / KNOWN-UNCERTAIN — read NOTES.md before trusting this.
+  # ---------------------------------------------------------------------------
+  # Runtime PM on the dGPU — this is what actually gets it to D3cold
+  # ---------------------------------------------------------------------------
+  # Blacklisting nouveau above stops a driver binding to the card. That is
+  # necessary but NOT sufficient, and the difference was measured on the real
+  # machine rather than assumed:
   #
-  #   Blacklisting nouveau guarantees no driver binds to the card. It does NOT
-  #   by itself guarantee D3cold. An unbound PCIe device only drops to D3cold if
-  #   the parent root port's runtime power management and the ACPI _PR3 power
-  #   resources cooperate, and on Dell/Alienware firmware that has historically
-  #   been model- and BIOS-version-dependent.
+  #   /sys/bus/pci/devices/0000:01:00.0/power/control  ->  "on"
+  #   /sys/bus/pci/devices/0000:01:00.0/power_state    ->  "D0"
   #
-  #   I am NOT asserting this works. Measure it on the real machine:
+  # An UNBOUND PCI device does not runtime-suspend by itself. With no driver
+  # there is nothing to enable runtime PM, so `power/control` stays at "on" —
+  # runtime PM disabled — and the card idles in D0 burning 10-15 W forever.
   #
-  #       lspci -nn | grep -i nvidia                            # find the address
-  #       cat /sys/bus/pci/devices/0000:01:00.0/power_state     # want D3cold
+  # Writing "auto" to that one attribute took BOTH functions to D3cold
+  # immediately (verified live before this rule was written). `d3cold_allowed`
+  # was already 1, so the Alienware firmware cooperates; it just had to be asked.
   #
-  #   (0000:01:00.0 is the conventional address for the dGPU on this chassis,
-  #   but confirm with lspci rather than assuming.)
+  # The audio function at 01:00.1 was already "auto" — snd_hda_intel is bound to
+  # it and enables runtime PM itself. It is matched anyway: both functions must
+  # be suspended for the device to reach D3cold, so leaving it to another
+  # driver's default is a dependency worth not having.
   #
-  #   If it reports D0 instead, do not start guessing kernel parameters — the
-  #   fallback options and their trade-offs are written up in NOTES.md under
-  #   "The dGPU might not reach D3cold".
+  # Matching on vendor 0x10de covers both functions in one rule. The only NVIDIA
+  # PCI devices on this machine are the dGPU and its HDMI audio; nothing uses
+  # either, and anything that ever did would simply resume it.
+  services.udev.extraRules = ''
+    ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x10de", ATTR{power/control}="auto"
+  '';
+
+  # Confirm after a reboot — a live `echo auto` proves the mechanism, only a
+  # reboot proves the rule fires:
+  #
+  #     cat /sys/bus/pci/devices/0000:01:00.0/power_state    # want D3cold
+  #
+  # scripts/verify-contract checks this too, and will now report PASS rather
+  # than the informational D0 line.
 }
