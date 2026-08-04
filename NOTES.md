@@ -18,6 +18,25 @@ built end to end.
 Pinned commit: `nixos-26.05` at `531670d871c0e29724a02f3cbcac170adc65b58c`
 (2026-08-03), recorded in `flake.lock`.
 
+**The config was also booted.** I built the test VM, added a temporary oneshot
+service that runs `scripts/verify-contract` at boot, and ran it under KVM. Final
+result: **30 passed, 0 failed, 4 informational** (the informational ones are the
+GPU checks, which no VM can pass). So the following are observed behaviour on a
+running system, not predictions:
+
+- `media` 1500/1500, `frank` 1000, `render` 303, `media` shell = `nologin`
+- `/data`, `/opt/palimpsest-stack` and the whole media tree created by
+  systemd-tmpfiles at `1500 1500 775`
+- `/data/transcode` mounted as tmpfs with the right ownership
+- all five sleep targets **masked**; `HandleLidSwitch=ignore` present in the
+  generated `logind.conf`
+- docker running; `palimpsest-stack.service` present and **not** started at boot
+- nftables table loaded with the RFC1918 rule in it
+- **the hardlink test passes** — `/data/torrents` → `/data/media`, same inode
+
+That VM run also caught three real bugs before you ever touched the laptop; they
+are described in §3.5.
+
 Verified by building, not by reading:
 
 - The complete system closure builds: `nixos-system-palimpsest-26.05...`, kernel
@@ -66,14 +85,19 @@ stays on one pinned nixpkgs.
 with invented UUIDs**. It exists only so the config can be evaluated off-target.
 It will not boot the laptop.
 
-You will replace it with the output of `nixos-generate-config`. When you do,
-**the generated file will contain entries that collide with
-`modules/storage.nix`**, and Nix will refuse to build with an error like
-`The option 'fileSystems."/data"' has conflicting definitions`.
+You will replace it with the output of `nixos-generate-config`.
 
-This is expected. `nixos-generate-config` writes an entry for **every**
-filesystem mounted at the time it runs, and by then you will have mounted
-`/data`. So after copying the generated file in, **delete these from it**:
+**`INSTALL.md` avoids this problem entirely by not mounting `/data` during the
+install** — `nixos-generate-config` only emits entries for filesystems mounted
+at the time it runs, so if `/data` is not mounted, nothing collides and there is
+nothing to clean up. `/data` mounts normally on the first real boot; it does not
+need to exist during installation. Follow INSTALL.md §4 and you can skip the
+rest of this section.
+
+If you *did* mount `/data` before generating, **the generated file will contain
+entries that collide with `modules/storage.nix`** and Nix will refuse to build
+with `The option 'fileSystems."/data"' has conflicting definitions`. The fix is
+to open the generated file and **delete**:
 
 - the whole `fileSystems."/data" = { ... };` block
 - the whole `fileSystems."/data/transcode" = { ... };` block, if present
@@ -185,6 +209,38 @@ before touching mine.
 ### 3.4 The VM does not test everything
 
 See §6.
+
+### 3.5 Three bugs the VM run caught
+
+Recording these because each was silent — none produced an error, a warning, or
+a failed build. They are all fixed; this is about what to distrust next time.
+
+1. **`services.openssh.openFirewall` defaults to `true`.** It appends port 22 to
+   `networking.firewall.allowedTCPPorts`, and because that is a separate option
+   definition it *merges past* the `allowedTCPPorts = [ ]` in
+   `modules/networking.nix` rather than being overridden by it. The generated
+   ruleset had a bare `tcp dport { 22 } accept` at the top of the input chain —
+   SSH open on every interface from any source, contrary to contract §5. Found
+   by reading the generated nftables ruleset, not the config. Fixed in
+   `modules/base.nix`; the comment there explains why the line must stay.
+
+2. **`mkVMOverride` (priority 10) outranks `mkForce` (priority 50).**
+   `modules/vm.nix` originally overrode the VM's `/data` with
+   `fileSystems."/data" = lib.mkForce {...}`. qemu-vm.nix replaces the entire
+   `fileSystems` attrset with `virtualisation.fileSystems` at a stronger
+   priority, so the override was silently dropped — no error, no mount, and
+   `/data` quietly became an ordinary directory on the VM's root disk. Found
+   only by booting and looking. Now uses `virtualisation.fileSystems`.
+
+3. **`systemctl is-enabled` returns `linked`, not `disabled`,** for a NixOS unit
+   with no `[Install]` section — which is exactly what `wantedBy = [ ]`
+   produces. `scripts/verify-contract` was calling the correct state a failure.
+   Both `linked` and `disabled` are now accepted.
+
+The general lesson, which applies to the two items above that remain unverified:
+**evaluating a Nix config proves the option names exist; it does not prove the
+resulting system behaves.** For anything security- or boot-critical, read the
+generated artifact (`nft list ruleset`, the unit text) or boot it.
 
 ---
 
