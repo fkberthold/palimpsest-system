@@ -175,4 +175,22 @@
   # Make vim the default for anything that consults $EDITOR (git commit,
   # systemctl edit, visudo).
   environment.variables.EDITOR = "vim";
+
+  # ---------------------------------------------------------------------------
+  # Terminfo for whatever terminal you SSH in from
+  # ---------------------------------------------------------------------------
+  # SSH forwards $TERM from the client, but the terminfo DATABASE lives on the
+  # server. Connect from kitty, Alacritty, WezTerm or anything else modern and
+  # the box gets a TERM it has never heard of — then `less`, `vim`, `htop` and
+  # anything systemd pipes through a pager fail with:
+  #
+  #     'xterm-kitty': unknown terminal type.
+  #
+  # A base NixOS install only knows the handful in ncurses' default set. This
+  # installs the wider collection, which is a few hundred KB of text files and
+  # removes an entire category of "why is this broken over SSH".
+  #
+  # Alternative if you ever want to keep the closure minimal: drop this and add
+  # just the one you use, e.g. `pkgs.kitty.terminfo`.
+  environment.enableAllTerminfo = true;
 }
