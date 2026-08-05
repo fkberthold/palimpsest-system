@@ -95,12 +95,15 @@ let
   # When you are happy, change this to `true`, rebuild, and it comes up at boot.
   #
   # FLIPPING THIS CHANGES TWO THINGS, not one. As well as making the unit
-  # wanted at boot, it switches on the contract v3 §3 restart policy
+  # wanted at boot, it switches on the contract §3 restart policy
   # (`Restart=on-failure`, `RestartSec=30`, bounded to 5 attempts per 10
   # minutes). That is deliberate: an unattended boot needs to recover from a
-  # slow tailnet by itself, whereas a unit you started by hand should fail in
+  # slow DHCP lease by itself, whereas a unit you start by hand should fail in
   # front of you rather than silently retrying while you read the journal.
-  enableAtBoot = false;
+  #
+  # ENABLED 2026-08-04, once the stack was confirmed working — which is the
+  # condition contract §3 attaches to this flag.
+  enableAtBoot = true;
 in
 {
   # ---------------------------------------------------------------------------
@@ -145,15 +148,14 @@ in
     ];
     wants = [ "network-online.target" ];
 
-    # Contract v2 §3, and this is what makes the `nofail` on /data safe.
+    # Contract §3, and this is what makes the `nofail` on /data safe.
     #
     # RequiresMountsFor turns each path into a dependency on the mount unit that
     # provides it. If /data did not mount, this unit does not start — so the
     # stack can never write media into an empty directory sitting on the root
     # filesystem, which would silently break every hardlink in the system.
     #
-    # /data/transcode is listed for a DIFFERENT and less obvious reason, added
-    # in contract v2. The tmpfs is not needed for correctness — if it fails to
+    # /data/transcode is listed for a DIFFERENT and less obvious reason. The tmpfs is not needed for correctness — if it fails to
     # mount, the directory underneath still exists with the right ownership, so
     # everything keeps working. That is exactly the problem: Jellyfin would
     # silently transcode to the NVMe instead of to RAM, which is precisely the
