@@ -13,6 +13,9 @@
 #   22/tcp        SSH                        LAN only         THIS FILE
 #   443/tcp       nginx, TLS front for       internet         THIS FILE
 #                 Jellyfin (contract §5.3)
+#   8443/tcp      nginx, TLS front for       internet, only   THIS FILE +
+#                 Jellyseerr (break-glass)   while router     THE ROUTER
+#                                            forwards it
 #   8096/tcp      Jellyfin (host networking) LAN only *       THIS FILE
 #   1900,7359/udp Jellyfin discovery         LAN only         THIS FILE
 #   5055/tcp      Jellyseerr                 LAN only         bind address
@@ -28,8 +31,15 @@
 #     loopback. The router forwards 443 and nothing else. See "THE
 #     PORT-FORWARD" below.
 #
-# THIS FILE IMPLEMENTS ONLY THE ROWS MARKED "THIS FILE" — five of them. The rows
+# THIS FILE IMPLEMENTS ONLY THE ROWS MARKED "THIS FILE" — six of them. The rows
 # marked "bind address" belong to the stack repo and appear nowhere below.
+#
+# THE 8443 ROW READS DIFFERENTLY FROM THE OTHERS, on purpose. This machine
+# accepts 8443 from any source at all times (the LAN gains nothing: it can
+# already reach Jellyseerr on 5055 directly). What turns internet reachability
+# on and off is the ROUTER FORWARD, created by hand for a window and deleted
+# after (contract §5.3 break-glass clause). The enforcement is split across
+# two boxes, and the router holds the switch.
 #
 # NO TAILSCALE. It was removed along with contract v3's tailnet design: the
 # person this server exists for uses a Roku, which has no Tailscale or WireGuard
@@ -149,8 +159,9 @@
     # ---- HOW THE PORT-FORWARD MEETS THESE RULES ----------------------------
     # A forwarded packet arrives here with the ORIGINAL PUBLIC SOURCE ADDRESS.
     # The router rewrites the destination, not the source. So internet traffic
-    # matches only the 443 rule below. It cannot match the two RFC1918 rules,
-    # falls through everywhere else, and dies on the chain's default policy.
+    # matches only the 443 rule below, or the 8443 rule while a break-glass
+    # forward stands. It cannot match the two RFC1918 rules, falls through
+    # everywhere else, and dies on the chain's default policy.
     #
     # That is the fail-closed property §5.3 requires, and it still holds for
     # every port except the one that is meant to answer the internet: forward
@@ -166,7 +177,8 @@
     extraInputRules = ''
       ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } tcp dport { 22, 8096 } accept comment "contract v3 §5.1: SSH + Jellyfin from LAN (RFC1918) only; host-bound services only"
       ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } udp dport { 1900, 7359 } accept comment "contract v3 §5.1: Jellyfin client auto-discovery, LAN only"
-      tcp dport 443 accept comment "contract v4 §5.3: the one any-source rule; TLS ends at nginx, which fronts Jellyfin for the outside Roku"
+      tcp dport 443 accept comment "contract v4 §5.3: standing internet path; TLS ends at nginx, which fronts Jellyfin for the outside Roku"
+      tcp dport 8443 accept comment "contract §5.3 break-glass: Jellyseerr behind TLS; the internet reaches this only while a router forward stands"
     '';
 
   };
@@ -199,4 +211,13 @@
   #          host-networked Jellyfin over loopback. 22 and 8096 keep their
   #          RFC1918 source match, so the fail-closed property survives for
   #          everything except the one port meant to answer the internet.
+  #
+  # §5.3 built → break-glass: TCP 8443 opened to any source as the second TLS
+  #          port, fronting Jellyseerr. Added because the alternative was
+  #          worse: Jellyseerr is Docker-published, so a router forward
+  #          straight to 5055 bypasses this file entirely (§5.2) and goes
+  #          live in plaintext with the Jellyfin admin password on the wire.
+  #          8443 keeps the occasional-access convenience and moves it behind
+  #          TLS. The internet reaches it only while a hand-made router
+  #          forward stands; the standing router state forwards 443 alone.
 }
