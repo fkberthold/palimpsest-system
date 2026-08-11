@@ -40,13 +40,24 @@ let
   # been removed — a Roku has no VPN client, so a tailnet could never have
   # served the actual requirement — but the underlying race did not go away
   # with it. It just moved from the tailnet address to the LAN address. So the
-  # poll is generalised rather than deleted: wait for a global-scope IPv4 on any
-  # real interface.
+  # poll is generalised rather than deleted: wait until the LAN is usable,
+  # without naming the interface.
   #
-  # `scope global` is doing real work in that match. It excludes 127.0.0.1 and
-  # link-local 169.254.0.0/16 — the latter being exactly what you get when DHCP
-  # has FAILED, which is a state we want to keep waiting through rather than
-  # treat as success.
+  # THE TEST IS A DEFAULT IPv4 ROUTE, NOT AN ADDRESS, and the distinction is a
+  # field failure, not taste. The first version matched any global-scope IPv4.
+  # docker0 carries 172.17.0.1, which is global scope, and this unit orders
+  # `after = docker.service`, so that address existed every time the poll ran.
+  # The gate was true by construction. On 2026-08-11 the machine booted with
+  # the ethernet cable out, the gate waved the stack through, and Docker 29
+  # left every published container running with no network at all (no
+  # endpoint on the bridge, no eth0 inside, nothing bound on the host). The
+  # services were healthy on their own loopback and unreachable from anywhere.
+  #
+  # A default route cannot make that mistake. No Docker bridge provides one.
+  # It appears when the DHCP lease lands and not before, it does not name the
+  # NIC (the interface name staying out of this repo is a design goal), and it
+  # still excludes the link-local 169.254.0.0/16 state a failed DHCP leaves
+  # behind, since that assigns an address but never a gateway.
   #
   # WHY IT FAILS RATHER THAN GIVING UP QUIETLY: a poll that times out and
   # returns success produces a half-started stack — some containers bound, some
@@ -60,10 +71,10 @@ let
   # verified present in the generated unit.
   waitForNetwork = pkgs.writeShellScript "wait-for-lan-address" ''
     for i in $(seq 1 60); do
-      ${pkgs.iproute2}/bin/ip -4 -o addr show scope global 2>/dev/null | grep -q 'inet ' && exit 0
+      ${pkgs.iproute2}/bin/ip -4 route list default 2>/dev/null | grep -q '^default' && exit 0
       sleep 1
     done
-    echo "no global IPv4 address after 60s; stack ports will fail to bind" >&2
+    echo "no default IPv4 route after 60s; the LAN is not up and stack ports will not bind" >&2
     exit 1
   '';
 
