@@ -267,6 +267,28 @@ The general lesson, which applies to the two items above that remain unverified:
 resulting system behaves.** For anything security- or boot-critical, read the
 generated artifact (`nft list ruleset`, the unit text) or boot it.
 
+### 3.6 A bug a LAN-less boot caught: the stack gate was true by construction
+
+Found in the field on 2026-08-11, after the machine booted with the ethernet
+cable out. The stack unit's `ExecStartPre` polled for any global-scope IPv4,
+and the unit orders `after = docker.service`. docker0 carries 172.17.0.1,
+which is global scope, so the address the gate waited for existed before the
+gate ever ran. It could not fail.
+
+What that let through: Docker 29 started every published container with no
+network wiring at all. No endpoint on the bridge, no eth0 inside the
+container, no runtime port map, nothing bound on the host. Each service ran
+healthy on its own loopback (Prowlarr answered `/ping` inside) and was
+unreachable from anywhere. Jellyfin, on host networking, was untouched, which
+made the failure look service-specific when it was stack-wide. Recovery was
+`docker compose up -d --force-recreate` of the six bridge containers.
+
+The gate now polls for a default IPv4 route instead. No Docker bridge
+provides one, it arrives only with the DHCP lease, and it names no interface.
+The lesson extends 3.5's: a precondition is only as good as the thing it
+cannot see past. This one was ordered after the exact service that made it
+always-true.
+
 ---
 
 ## 4. Contract observations

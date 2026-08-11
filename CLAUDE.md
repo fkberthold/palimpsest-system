@@ -185,6 +185,12 @@ is contract §7.2's listener scan, run after stack bring-up:
    through `pkgs.lib` is circular by construction — `nixpkgs.config` is an input
    to building `pkgs` — and happens to terminate only by accident of evaluation
    order.
+7. **The stack gate must test for a default route, never for an address.** The
+   unit orders `after = docker.service` and docker0's 172.17.0.1 is global
+   scope, so an address-shaped gate is true before it runs. That shipped, and a
+   LAN-less boot produced containers running with no network wiring at all.
+   NOTES.md §3.6 has the postmortem. Do not "simplify" the poll back to an
+   address check.
 
 ## Working here
 
