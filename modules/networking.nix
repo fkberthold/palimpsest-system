@@ -11,6 +11,8 @@
 #   port          service                    reachable from   enforced by
 #   ------------  -------------------------  ---------------  --------------
 #   22/tcp        SSH                        LAN only         THIS FILE
+#   443/tcp       nginx, TLS front for       internet         THIS FILE
+#                 Jellyfin (contract §5.3)
 #   8096/tcp      Jellyfin (host networking) LAN only *       THIS FILE
 #   1900,7359/udp Jellyfin discovery         LAN only         THIS FILE
 #   5055/tcp      Jellyseerr                 LAN only         bind address
@@ -21,12 +23,12 @@
 #   8989/tcp      Sonarr                     LAN only         bind address
 #   9696/tcp      Prowlarr                   LAN only         bind address
 #
-#   * 8096 is intended to become internet-reachable via a router port-forward,
-#     for a Roku client outside the house. See "THE PLANNED PORT-FORWARD" below
-#     — that is NOT yet configured here, and forwarding 8096 as it stands today
-#     would send passwords over plaintext HTTP.
+#   * 8096 itself stays LAN-only and plaintext. The internet path is 443: TLS
+#     ends at nginx (modules/remote-access.nix), which reaches Jellyfin over
+#     loopback. The router forwards 443 and nothing else. See "THE
+#     PORT-FORWARD" below.
 #
-# THIS FILE IMPLEMENTS ONLY THE ROWS MARKED "THIS FILE" — four of them. The rows
+# THIS FILE IMPLEMENTS ONLY THE ROWS MARKED "THIS FILE" — five of them. The rows
 # marked "bind address" belong to the stack repo and appear nowhere below.
 #
 # NO TAILSCALE. It was removed along with contract v3's tailnet design: the
@@ -59,21 +61,23 @@
 #      a rule here. Add it AT THAT TIME. That is the only reason this list grows.
 #
 # ---------------------------------------------------------------------------
-# THE PLANNED PORT-FORWARD — read before opening anything on the router
+# THE PORT-FORWARD: BUILT, contract v4 §5.3
 # ---------------------------------------------------------------------------
-# The intent is to forward a port so a Roku outside the house can reach
-# Jellyfin. That is a deliberate, accepted risk and this file does not argue
-# with it. But note what is and is not true TODAY:
+# A Roku outside the house reaches Jellyfin through it. The risk is accepted
+# by the contract, and the shape is the one the contract requires:
 #
-#   - 8096 is PLAIN HTTP. Forwarding it as-is puts your father's password, and
-#     every session token, on the open internet in cleartext.
-#   - Jellyfin has no rate limiting and no MFA. It is not built to be the thing
-#     facing the internet.
+#   - The router forwards 443 and nothing else. Never 8096 (plaintext), and
+#     never 22.
+#   - TLS ends at nginx on this machine (modules/remote-access.nix), which
+#     reaches Jellyfin over loopback. 8096 never faces the internet, so the
+#     viewer's password and session tokens never cross it in the clear.
+#   - The certificate comes by DNS-01, so port 80 stays closed too. One port
+#     forwarded, one any-source rule below, and they are the same port.
 #
-# The supported way to do this is to terminate TLS in front of Jellyfin and
-# forward 443 ONLY — never 8096, and never 22. NixOS does this declaratively
-# with `services.nginx` + `security.acme`, which is a contained addition to this
-# repo when you want it. Nothing here is set up for it yet.
+# What Jellyfin still does not have is rate limiting and MFA. nginx in front
+# narrows the attack surface to TLS handshake plus proxied HTTP, and the
+# rejectSSL catch-all keeps bare-IP scanners from ever seeing a banner, but
+# the password quality of each Jellyfin account is what guards sign-in.
 # =============================================================================
 { ... }:
 
@@ -142,28 +146,17 @@
     #          discovery traffic but inbound probes are dropped, and every
     #          client in the house has to be pointed at an IP by hand.
     #
-    # ---- WHAT THIS MEANS FOR THE PLANNED PORT-FORWARD ----------------------
+    # ---- HOW THE PORT-FORWARD MEETS THESE RULES ----------------------------
     # A forwarded packet arrives here with the ORIGINAL PUBLIC SOURCE ADDRESS.
-    # The router rewrites the destination, not the source. So a packet from the
-    # internet matches neither rule above, falls through, and is dropped by the
-    # chain's default policy.
+    # The router rewrites the destination, not the source. So internet traffic
+    # matches only the 443 rule below. It cannot match the two RFC1918 rules,
+    # falls through everywhere else, and dies on the chain's default policy.
     #
-    # Consequence, and it is a two-sided one:
-    #
-    #   GOOD: a port-forward switched on at the router does NOT silently expose
-    #         anything. This layer still fails closed. You cannot accidentally
-    #         publish Jellyfin by fat-fingering the router.
-    #
-    #   ALSO: which means the forward will simply NOT WORK until a rule is added
-    #         here on purpose. That is the intended shape — internet exposure
-    #         should take a deliberate edit in a file under version control, not
-    #         a checkbox in a router UI.
-    #
-    # When you get there, the rule to add is for the TLS port only, e.g.
-    #
-    #     tcp dport 443 accept comment "public: Jellyfin via TLS reverse proxy"
-    #
-    # NOT 8096 (plaintext), and never 22.
+    # That is the fail-closed property §5.3 requires, and it still holds for
+    # every port except the one that is meant to answer the internet: forward
+    # 8096 or 22 at the router by mistake and the packets still go nowhere.
+    # The 443 rule is the deliberate, version-controlled edit that the earlier
+    # revisions of this file said internet exposure must cost.
     #
     # TCP 5055 (Jellyseerr) WAS in this rule under contract v2 and was REMOVED
     # in v3. It is Docker-published, so this rule never saw its traffic — the
@@ -173,6 +166,7 @@
     extraInputRules = ''
       ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } tcp dport { 22, 8096 } accept comment "contract v3 §5.1: SSH + Jellyfin from LAN (RFC1918) only; host-bound services only"
       ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } udp dport { 1900, 7359 } accept comment "contract v3 §5.1: Jellyfin client auto-discovery, LAN only"
+      tcp dport 443 accept comment "contract v4 §5.3: the one any-source rule; TLS ends at nginx, which fronts Jellyfin for the outside Roku"
     '';
 
   };
@@ -197,4 +191,12 @@
   #          requirement — a Roku has no VPN client — so it was complexity and
   #          an external account dependency bought nothing. The six admin UIs
   #          become LAN-only, enforced by their bind address, not here.
+  #
+  # LAN-only → §5.3 built: TCP 443 opened to any source, the first and only
+  #          any-source rule this file has carried. It is also the only port
+  #          the router forwards, and the two are the same port on purpose.
+  #          TLS ends at nginx (modules/remote-access.nix), which reaches
+  #          host-networked Jellyfin over loopback. 22 and 8096 keep their
+  #          RFC1918 source match, so the fail-closed property survives for
+  #          everything except the one port meant to answer the internet.
 }
