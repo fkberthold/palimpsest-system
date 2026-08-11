@@ -443,13 +443,25 @@ human.
    Full detail in INSTALL.md §11.
    Note there is **no text editor** on the machine (`environment.defaultPackages`
    is perl/rsync/strace); use `cat >>` or add one.
-6. **Router** — set a DHCP reservation for the wired interface. Do **not**
-   port-forward anything.
-7. **Run the verifier**:
+6. **Router** — set a DHCP reservation for the wired interface. Forward TCP
+   **443** to this machine and nothing else (contract §5.3). Never 8096, never
+   22, and not 80 either (the certificate comes by DNS-01, so the HTTP
+   challenge port is not needed).
+7. **DuckDNS token file** — the one credential contract §5.3 needs. The
+   updater timer and lego's DNS-01 proof both read it, and it never appears
+   in this repo. As root:
+   ```bash
+   install -d -m 0700 /var/lib/secrets
+   umask 077
+   printf 'DUCKDNS_TOKEN=%s\n' '<token from duckdns.org>' > /var/lib/secrets/duckdns.env
+   ```
+   Until this file exists, nginx serves a self-signed placeholder, the
+   `acme-*.service` unit fails loudly, and nothing else breaks.
+8. **Run the verifier**:
    ```bash
    sudo /opt/palimpsest-system/scripts/verify-contract
    ```
-8. **Later, when the stack works** — flip `enableAtBoot` to `true` in
+9. **Later, when the stack works** — flip `enableAtBoot` to `true` in
    `modules/containers.nix` and rebuild. Note that `systemctl enable
    palimpsest-stack` does **not** persist on NixOS; it is reverted on the next
    rebuild. The flag in the file is the real switch.

@@ -348,6 +348,13 @@ if command -v nft >/dev/null 2>&1; then
     printf '%s' "$fw" | grep -q 'tailscale0' \
       && no "ruleset still references tailscale0 — Tailscale was removed from this design" \
       || ok "no stale tailscale0 rules"
+
+    # Contract v4 §5.3: the internet path. One any-source rule, and it is 443.
+    # The grep -v saddr matters: a 443 rule with a source match would pass a
+    # naive grep while leaving the Roku outside unable to connect.
+    printf '%s' "$fw" | grep 'tcp dport 443' | grep -qv 'saddr' \
+      && ok "  443 accepted from any source (contract v4 §5.3)" \
+      || no "  no any-source 443 rule. The Roku path is not in the ruleset (contract v4 §5.3)"
   else
     no "inet nixos-fw table is not loaded — the firewall is not up"
   fi
@@ -358,6 +365,23 @@ fi
 note "§5.2: Docker-published ports (5055, 6767, 7878, 8080, 8081, 8989, 9696) bypass this firewall entirely — DNAT in PREROUTING never reaches INPUT. They are NOT verified by this script and no rule here governs them."
 note "  To verify those, after stack bring-up run the contract §7.2 listener check:  ss -ltnp | awk '\$4 !~ /^\\[/ {print \$4}' | sort -u"
 note "  No Docker-published port may show 0.0.0.0: or *: — every one should be bound to this machine's LAN address only."
+
+# -----------------------------------------------------------------------------
+hdr '§5.3  Internet path: nginx TLS front and DuckDNS'
+# -----------------------------------------------------------------------------
+# The firewall rule above says packets may arrive. These say something answers.
+
+systemctl is-active --quiet nginx \
+  && ok "nginx is active" \
+  || no "nginx is not active. TLS termination is down, and the Roku path with it"
+
+systemctl is-active --quiet duckdns-update.timer \
+  && ok "duckdns-update.timer is active" \
+  || no "duckdns-update.timer is not active. The DuckDNS name goes stale when the WAN address moves"
+
+[[ -f /var/lib/secrets/duckdns.env ]] \
+  && ok "DuckDNS token file exists" \
+  || no "/var/lib/secrets/duckdns.env is missing. See NOTES.md section 5, step 7"
 
 # 22 and 8096 must NOT be reachable from a public source address. The RFC1918
 # match is what enforces that, so assert the rules are source-scoped rather than
