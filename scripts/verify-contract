@@ -355,6 +355,9 @@ if command -v nft >/dev/null 2>&1; then
     printf '%s' "$fw" | grep 'tcp dport 443' | grep -qv 'saddr' \
       && ok "  443 accepted from any source (contract v4 §5.3)" \
       || no "  no any-source 443 rule. The Roku path is not in the ruleset (contract v4 §5.3)"
+    printf '%s' "$fw" | grep 'tcp dport 8443' | grep -qv 'saddr' \
+      && ok "  8443 accepted from any source (contract §5.3 break-glass; the router is the switch)" \
+      || no "  no any-source 8443 rule. The break-glass path is not in the ruleset (contract §5.3)"
   else
     no "inet nixos-fw table is not loaded — the firewall is not up"
   fi

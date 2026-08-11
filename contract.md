@@ -162,7 +162,7 @@ v1 through v3 said "nothing is port-forwarded from the router, ever." That was w
 
 | Rule | Value |
 |---|---|
-| Port forwarded at the router | **443/tcp only** |
+| Port forwarded at the router | **443/tcp** standing. **8443/tcp** only during a break-glass window, deleted after use |
 | Never forwarded | **22**, **8096**, and every Docker-published port |
 | TLS | Terminated on `palimpsest` by a host-side reverse proxy (nginx + ACME), declarative in `palimpsest-system` |
 | Jellyfin's own port | Stays **8096, plaintext, LAN-only**. The proxy reaches it locally; the internet never does. |
@@ -171,6 +171,8 @@ v1 through v3 said "nothing is port-forwarded from the router, ever." That was w
 **8096 must never be the forwarded port.** It is plaintext HTTP; forwarding it puts the viewer's password and every session token on the open internet in the clear. Jellyfin also has no rate limiting and no MFA, so it is not built to be the process answering the internet directly.
 
 **The host firewall fails closed here, deliberately.** A forwarded packet arrives with its original public source address, so it matches no RFC1918 rule and is dropped. Switching on a forward at the router therefore cannot expose this machine by itself — internet exposure additionally requires a deliberate edit to a version-controlled file. That property is to be preserved.
+
+**Break-glass access to Jellyseerr.** Jellyseerr's standing posture is LAN-only. For occasional remote use, nginx serves it TLS-terminated on host-bound 8443 at all times, and the internet reaches that port only while a hand-made router forward exists. The forward is created for the occasion and deleted afterward. 5055 itself stays Docker-published and must never be forwarded: §5.2 gives it no host-firewall layer, so a forward to it would go live in plaintext with nothing on this machine consulted.
 
 ## 6. Secrets
 
@@ -244,6 +246,10 @@ curl -s https://ipinfo.io/ip     # must differ
 ```
 
 ## 8. Changelog
+
+### v5 — 2026-08-11
+
+1. **§5.3 — break-glass forward for Jellyseerr.** The standing router state still forwards 443 alone. 8443 may be forwarded by hand for a window and deleted after, reaching Jellyseerr TLS-terminated on the host. 5055 stays never-forwarded: it is Docker-published, so the host firewall never sees it (§5.2), and forwarding it would ship the Jellyfin admin password in plaintext. Amended at my direction; the agent typed it.
 
 ### v4 — 2026-08-04
 

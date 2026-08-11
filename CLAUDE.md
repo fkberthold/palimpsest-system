@@ -26,7 +26,7 @@ an agent cannot cross is worth more than the convenience of crossing it.
 ## `contract.md` is the source of truth and you may not change it
 
 `contract.md` is the interface both halves are built against, currently at
-**version 3 (2026-08-04)**. **No value in it may be changed by an agent.** If you
+**version 5 (2026-08-11)**. **No value in it may be changed by an agent.** If you
 believe one is wrong, stop and say so — v2 and v3 both exist because conflicts
 were flagged rather than worked around, and Frank amended the contract. v3 in
 particular corrected a defect in v2 that *both* halves had faithfully

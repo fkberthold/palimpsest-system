@@ -9,14 +9,32 @@
 #
 # Three properties this file exists to hold:
 #
-#   1. 443 is the only port the router forwards. The ACME proof runs over DNS
-#      (DNS-01 through DuckDNS), not HTTP, so port 80 stays closed and the
-#      contract's "443/tcp only" row stays literally true.
+#   1. 443 is the only STANDING forward at the router. The ACME proof runs
+#      over DNS (DNS-01 through DuckDNS), not HTTP, so port 80 stays closed.
+#      8443 (below) is forwarded only during deliberate break-glass windows
+#      and the router keeps no forward for it the rest of the time.
 #   2. Jellyfin stays plaintext and LAN-only on 8096. The proxy reaches it
 #      over loopback. The internet never does.
 #   3. A scanner that arrives by bare IP gets a dropped TLS handshake, not a
-#      Jellyfin banner (the rejectSSL catch-all below). Only a client that
-#      asks for the DuckDNS name by SNI reaches the proxy at all.
+#      Jellyfin banner (the rejectSSL catch-all below, on both TLS ports).
+#      Only a client that asks for the DuckDNS name by SNI reaches a proxy.
+#
+# THE BREAK-GLASS PORT: 8443 is Jellyseerr behind the same TLS front. It
+# exists because Jellyseerr is Docker-published, and per contract §5.2 a
+# Docker-published port has no host-firewall layer at all: a router forward
+# straight to 5055 would go live the moment it was saved, plaintext, carrying
+# the Jellyfin admin password. This vhost is the same convenience with TLS.
+#
+# The switch is the ROUTER FORWARD, by design. This machine always answers
+# 8443 (the LAN can already reach 5055 directly, so nothing new is granted),
+# and the internet reaches it only while a router forward for 8443 exists.
+# The procedure:
+#
+#   open:   Xfinity admin -> add port forward TCP 8443 -> palimpsest
+#   use:    https://vvovv.duckdns.org:8443
+#   close:  delete the forward. Do not leave it standing: Jellyseerr sits
+#           behind Jellyfin sign-in with no MFA, and the standing posture
+#           for it is LAN-only (contract §5.3 break-glass clause).
 #
 # The name and the credential:
 #
@@ -117,10 +135,19 @@ in
     # ssl_reject_handshake. A scanner sweeping the IPv4 space connects with no
     # SNI (or the wrong SNI) and the handshake dies before any certificate or
     # banner goes out. Shodan learns "a TLS port", not "a Jellyfin". The Roku
-    # asks for the name, so it never lands here.
+    # asks for the name, so it never lands here. The explicit listen list is
+    # what extends the same treatment to the break-glass port: without it,
+    # 8443's only server block would be the Jellyseerr vhost, and a bare-IP
+    # scan during an open window would complete a handshake there.
     virtualHosts."reject-by-default" = {
       default = true;
       rejectSSL = true;
+      listen = [
+        { addr = "0.0.0.0"; port = 443; ssl = true; }
+        { addr = "[::]"; port = 443; ssl = true; }
+        { addr = "0.0.0.0"; port = 8443; ssl = true; }
+        { addr = "[::]"; port = 8443; ssl = true; }
+      ];
     };
 
     virtualHosts.${fqdn} = {
@@ -137,6 +164,29 @@ in
         extraConfig = ''
           proxy_buffering off;
         '';
+      };
+    };
+
+    # The break-glass vhost: Jellyseerr on 8443, same name, same certificate
+    # (a certificate names a host, not a port). Procedure and rationale in the
+    # header comment. A separate attrset from the vhost above because one
+    # NixOS vhost cannot serve different upstreams on different ports.
+    virtualHosts."jellyseerr-breakglass" = {
+      serverName = fqdn;
+      onlySSL = true;
+      useACMEHost = fqdn;
+      listen = [
+        { addr = "0.0.0.0"; port = 8443; ssl = true; }
+        { addr = "[::]"; port = 8443; ssl = true; }
+      ];
+      locations."/" = {
+        # The stack publishes Jellyseerr on the LAN address (contract §5.2),
+        # so that address is the only door nginx can knock on. This is the one
+        # place the system layer writes the house's address, and it holds the
+        # same value as BIND_ADDR_LAN in the stack's .env. If the reservation
+        # ever moves, both move.
+        proxyPass = "http://10.0.0.155:5055";
+        proxyWebsockets = true;
       };
     };
   };
