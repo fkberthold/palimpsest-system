@@ -24,6 +24,7 @@
     ../../modules/containers.nix # contract §3 — Docker + the stack unit
     ../../modules/networking.nix # contract §5 — firewall, LAN exposure
     ../../modules/remote-access.nix # contract §5.3 — TLS front door for the outside Roku
+    ../../modules/minecraft.nix # contract v6: Minecraft dirs, backup drive, firewall and unit
     ../../modules/vm.nix # test-VM overrides only; no effect on the real machine
   ];
 
