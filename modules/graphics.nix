@@ -52,6 +52,40 @@
   };
 
   # ---------------------------------------------------------------------------
+  # Make the kernel bind i915 to the iGPU, not xe — the prerequisite for all of
+  # the above
+  # ---------------------------------------------------------------------------
+  # Everything else in this module configures the VAAPI USERSPACE. None of it
+  # matters if no kernel DRM driver binds the Intel iGPU and creates
+  # /dev/dri/renderD128 — and on the kernel this release ships (6.18), by
+  # default NOTHING does.
+  #
+  # The new `xe` driver now claims Alder Lake-P (PCI 8086:46a6) but then refuses
+  # it — "Your graphics device 46a6 is not officially supported by xe driver in
+  # this kernel version" — and never binds (lsmod shows xe loaded with 0 refs).
+  # Because xe has reserved the ID, i915 (which fully supports this GPU and is
+  # the driver the iHD stack above expects) is kept off it and never loads. The
+  # result: the only /dev/dri node is card0, a simpledrm EFI framebuffer; there
+  # is no render node; and every VAAPI transcode dies with "Device creation
+  # failed / No device available for decoder: vaapi", which surfaces in Jellyfin
+  # clients as a "source error" the moment a transcode (e.g. a downscale to
+  # 360p) is required. Confirmed on hardware 2026-09-07.
+  #
+  # Steer the arbitration explicitly: force i915 onto 46a6 and keep xe off it.
+  # The kernel's own diagnostic prints the inverse pair (to force xe); this is
+  # that pair flipped, because on Alder Lake i915 is the mature, supported path.
+  # Takes effect on reboot; verify with `ls /dev/dri` (expect renderD128) and
+  # `vainfo` (expect H264/HEVC encode+decode).
+  #
+  # If low-power encode later needs GuC/HuC (the VERIFY note at the bottom of
+  # this file), add "i915.enable_guc=3" to THIS same list, not a second
+  # boot.kernelParams.
+  boot.kernelParams = [
+    "i915.force_probe=46a6"
+    "xe.force_probe=!46a6"
+  ];
+
+  # ---------------------------------------------------------------------------
   # Tell libva which driver to load
   # ---------------------------------------------------------------------------
   # Strictly speaking this is belt-and-braces: iHD is the only driver installed,
