@@ -78,6 +78,22 @@ let
     exit 1
   '';
 
+  # Non-fatal sibling of waitForNetwork, used to gate the Docker DAEMON itself
+  # (see the systemd.services.docker override below for the full rationale). Same
+  # default-route poll, but it exits 0 on timeout instead of 1: dockerd must
+  # never be blocked from starting, because a box whose DHCP genuinely failed
+  # still needs `docker ps` and manual `docker compose` — its only debugging
+  # handles. 45s is ample for a wired DHCP lease; the stack unit's own 60s gate
+  # remains the hard authority for the compose start.
+  waitForNetworkSoft = pkgs.writeShellScript "docker-wait-for-lan-address" ''
+    for i in $(seq 1 45); do
+      ${pkgs.iproute2}/bin/ip -4 route list default 2>/dev/null | grep -q '^default' && exit 0
+      sleep 1
+    done
+    echo "no default IPv4 route after 45s; starting docker anyway (published binds may fail until DHCP lands)" >&2
+    exit 0
+  '';
+
   # The docker CLI, by absolute store path. systemd units get almost no PATH, so
   # every ExecStart must name its binary in full.
   docker = "${config.virtualisation.docker.package}/bin/docker";
@@ -132,6 +148,42 @@ in
     # known-good image of a service you just broke. Container updates on this
     # box are meant to be deliberate, not automatic.
   };
+
+  # ---------------------------------------------------------------------------
+  # Gate the Docker DAEMON on a usable LAN address — contract §3 / §5.2
+  # ---------------------------------------------------------------------------
+  # TWO things start containers at boot, not one, and only one of them was gated.
+  #
+  #   1. The palimpsest-stack unit's `docker compose up -d`, which waits for a
+  #      default route (waitForNetwork) before it runs. Correct.
+  #   2. dockerd itself: on daemon start it re-applies each container's
+  #      `restart: unless-stopped` policy and brings back everything that was up
+  #      before the last shutdown. This path is SEPARATE from the stack unit and
+  #      fires the instant docker.service starts — with nothing gating it.
+  #
+  # On a cold boot #2 runs ~2s before dhcpcd finishes ARP-probing and actually
+  # assigns BIND_ADDR_LAN (10.0.0.155). Every published port then fails to bind
+  # with "cannot assign requested address". The plain *arr containers are
+  # recreated cleanly when the gated `up -d` re-runs a moment later, so they look
+  # fine — but gluetun does not recover: its bridge endpoint half-joins and THEN
+  # the port publish fails, wedging the endpoint. It crash-loops forever with
+  # "default route not found" until a human recreates the container, and its two
+  # `network_mode: service:gluetun` dependents (qbittorrent, the port-sync
+  # helper) go down with it. Confirmed from the boot journal on 2026-09-06.
+  #
+  # docker.service is already ordered `After=network-online.target`, but on NixOS
+  # that target is reached before the DHCP lease lands — the exact weakness the
+  # stack unit papers over with waitForNetwork, and which docker.service had no
+  # equivalent for. This adds one.
+  #
+  # NON-FATAL by design (waitForNetworkSoft exits 0 on timeout): the daemon must
+  # still come up when DHCP has genuinely failed, or a headless box loses
+  # `docker ps` and manual `docker compose`, its only debugging handles. The
+  # worst case when the timeout is hit is exactly today's behaviour — no worse.
+  #
+  # Placement note: docker.service ships no ExecStartPre of its own (verify with
+  # `systemctl cat docker`), so this adds cleanly rather than replacing one.
+  systemd.services.docker.serviceConfig.ExecStartPre = [ "${waitForNetworkSoft}" ];
 
   # Docker images and volumes land in /var/lib/docker, i.e. on the root
   # filesystem, NOT on /data. That is intentional — /data is for media, and
