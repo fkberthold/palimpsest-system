@@ -39,7 +39,10 @@ let
   # work. Flip this once the server has been played on, the same way the
   # stack's flag was flipped. A manual `systemctl enable` is reverted by the
   # next rebuild, so this is the only switch that sticks.
-  enableAtBoot = false;
+  #
+  # Enabled 2026-10-10, after a night of play on the new box, the panel
+  # running, and a restore drill that passed.
+  enableAtBoot = true;
 in
 {
   # ---------------------------------------------------------------------------
