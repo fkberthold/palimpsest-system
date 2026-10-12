@@ -1,6 +1,6 @@
 # palimpsest — Interface Contract
 
-**Version 6, 2026-10-08.** Supersedes v5 entirely. See §8 for what changed and why.
+**Version 7, 2026-10-12.** Supersedes v6 entirely. See §8 for what changed and why.
 
 **This is the source of truth.** Both the NixOS configuration and the container stack are built against it. Neither agent may change a value here; if an agent believes a value is wrong, it stops and tells me. Amendments are made by me, in this file, and handed to both sessions — that is how v2 came to exist.
 
@@ -135,6 +135,7 @@ The **Enforced by** column is not commentary. It is the difference between a rul
 | 8081/tcp | SABnzbd | LAN only | **Bind address** (Docker-published) |
 | 8989/tcp | Sonarr | LAN only | **Bind address** (Docker-published) |
 | 9696/tcp | Prowlarr | LAN only | **Bind address** (Docker-published) |
+| 11011/tcp | Cleanuparr | LAN only | **Bind address** (Docker-published) |
 | 25565/tcp | Minecraft | **Internet**, via a standing router forward (§5.3) | Host firewall (host networking) |
 | 8765/tcp | Minecraft web panel | LAN only | Host firewall (host networking) |
 | 25575/tcp | Minecraft RCON | Loopback only | Host firewall (no rule, so default-deny drops it) |
@@ -162,7 +163,7 @@ Therefore **every published port binds an explicit address**:
 
 | Class | Bind | Services |
 |---|---|---|
-| Docker-published | `${BIND_ADDR_LAN}:<port>:<port>` | 5055, 6767, 7878, 8080, 8081, 8989, 9696 |
+| Docker-published | `${BIND_ADDR_LAN}:<port>:<port>` | 5055, 6767, 7878, 8080, 8081, 8989, 9696, 11011 |
 | Host-networked | not published by Docker; host firewall governs | 8096, 1900, 7359, 25565, 8765, 25575 |
 
 `BIND_ADDR_LAN` **has no default.** It must be set to this machine's DHCP-reserved LAN address. If it is unset, the substitution yields an invalid port mapping and `docker compose` refuses to start — which is the correct failure: loud, immediate, at bring-up, rather than a service quietly listening on every interface. This is also why the stack unit must wait for an address (§3).
@@ -243,12 +244,12 @@ Same inode, `links=2`. If this fails, stop — every import silently becomes a f
 ss -ltnp | awk '$4 !~ /^\[/ {print $4}' | sort -u
 ```
 
-No listener on a Docker-published port may show `0.0.0.0:` or `*:`. Every one of the seven must appear on this machine's LAN address and nowhere else. A listener on `0.0.0.0` is the v2 defect returning.
+No listener on a Docker-published port may show `0.0.0.0:` or `*:`. Every one of the eight must appear on this machine's LAN address and nowhere else. A listener on `0.0.0.0` is the v2 defect returning.
 
 **Exposure matches §5.1.** From a LAN host that is *not* on the tailnet:
 
 ```bash
-nmap -Pn -p 22,5055,6767,7878,8080,8081,8096,8989,9696,25565,8765,25575 <palimpsest-lan-ip>
+nmap -Pn -p 22,5055,6767,7878,8080,8081,8096,8989,9696,11011,25565,8765,25575 <palimpsest-lan-ip>
 ```
 
 All of them open except 25575, which must show filtered. Everything else is LAN-reachable by design. Note this scan says nothing about whether §5.2 is implemented correctly — a service bound to `0.0.0.0` and one bound to the LAN address look identical from the LAN. The `ss` check above is the one with teeth. To test §5.3, scan from **outside** the network: only 443 and 25565 may answer.
@@ -261,6 +262,13 @@ curl -s https://ipinfo.io/ip     # must differ
 ```
 
 ## 8. Changelog
+
+### v7, 2026-10-12
+
+1. **§5.1 and §5.2, Cleanuparr on 11011/tcp.** It's an eighth Docker-published service, LAN only and bound to `BIND_ADDR_LAN` like the other seven. It clears fake and stalled downloads out of qBittorrent and the Sonarr/Radarr queues, and its UI is the only way to configure it. As a Docker-published port it needs no firewall rule, and per §5.2 it must not get one.
+2. **§7.2, the listener check counts eight**, and the LAN `nmap` scan includes 11011.
+
+The system layer still lists seven Docker-published ports in two places, `scripts/verify-contract` and the port table comment in `modules/networking.nix`. Neither breaks anything, but both should name 11011 the next time that repo is worked on. Amended at my direction, and the agent typed it.
 
 ### v6, 2026-10-08
 
